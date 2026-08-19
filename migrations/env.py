@@ -2,10 +2,27 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from app.core.config import settings
+from app.db.models import (  # noqa: F401
+    DataSource,
+    DataSourceColumn,
+    DataSourceConnection,
+    DataSourceMetadataSync,
+    DataSourceRelationship,
+    DataSourceSchema,
+    DataSourceTable,
+    EmailVerificationToken,
+    Organization,
+    PasswordResetToken,
+    RefreshToken,
+    User,
+    Workspace,
+    WorkspaceMember,
+)
 from app.db.session import Base
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+# ConfigParser treats '%' as interpolation, so URL-encoded passwords must be escaped.
+config.set_main_option("sqlalchemy.url", settings.DATABASE_URL.replace("%", "%%"))
 
 target_metadata = Base.metadata
 

@@ -1,0 +1,95 @@
+from app.ai.context import (
+    MetadataContextProvider,
+    MetadataSearchContextProvider,
+    build_ai_context,
+)
+from app.ai.exceptions import (
+    AIConfigurationError,
+    AIContextError,
+    AIError,
+    AIProviderAuthenticationError,
+    AIProviderError,
+    AIProviderRateLimitError,
+    AIProviderTimeoutError,
+    AIRequestValidationError,
+    AIResponseValidationError,
+)
+from app.ai.intent import AIIntentService
+from app.ai.intent_types import (
+    AIConfidence,
+    AIIntent,
+    AIIntentType,
+    AIOperationType,
+    AIPlanCapability,
+    AIRequestPlan,
+    FilterOperator,
+    TimeRangePreset,
+)
+from app.ai.metadata_resolver import MetadataContextResolver
+from app.ai.metadata_types import ResolvedMetadataContext
+from app.ai.orchestrator import AIAnalystOrchestrator
+from app.ai.planner import AIRequestPlanner
+from app.ai.providers import (
+    LLMGeneration,
+    LLMMessage,
+    LLMProvider,
+    LLMProviderConfig,
+    StructuredGeneration,
+    create_llm_provider,
+    get_llm_provider,
+    llm_provider_config_from_settings,
+)
+from app.ai.types import (
+    AI_CAPABILITY_CHAT,
+    AI_CAPABILITY_METADATA_LOOKUP,
+    AIAnalysisResult,
+    AIContext,
+    AIRequest,
+    AIResponse,
+    MetadataSnippet,
+    TokenUsage,
+)
+
+__all__ = [
+    "AI_CAPABILITY_CHAT",
+    "AI_CAPABILITY_METADATA_LOOKUP",
+    "AIAnalysisResult",
+    "AIAnalystOrchestrator",
+    "AIConfidence",
+    "AIConfigurationError",
+    "AIContext",
+    "AIContextError",
+    "AIError",
+    "AIIntent",
+    "AIIntentService",
+    "AIIntentType",
+    "AIOperationType",
+    "AIPlanCapability",
+    "AIProviderAuthenticationError",
+    "AIProviderError",
+    "AIProviderRateLimitError",
+    "AIProviderTimeoutError",
+    "AIRequest",
+    "AIRequestPlan",
+    "AIRequestPlanner",
+    "AIRequestValidationError",
+    "AIResponse",
+    "AIResponseValidationError",
+    "FilterOperator",
+    "LLMGeneration",
+    "LLMMessage",
+    "LLMProvider",
+    "LLMProviderConfig",
+    "MetadataContextProvider",
+    "MetadataContextResolver",
+    "MetadataSearchContextProvider",
+    "MetadataSnippet",
+    "ResolvedMetadataContext",
+    "StructuredGeneration",
+    "TimeRangePreset",
+    "TokenUsage",
+    "build_ai_context",
+    "create_llm_provider",
+    "get_llm_provider",
+    "llm_provider_config_from_settings",
+]
