@@ -3,27 +3,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from app.mcp.schemas.postgres import (
+    MCPDataSourceRequest,
+    MCPDescribeTableRequest,
+    MCPListTablesRequest,
+    MCPSampleRowsRequest,
+    MCPTableRequest,
+)
 
 
 @dataclass(frozen=True)
 class MCPToolContext:
     workspace_id: UUID
     user_id: UUID | None = None
-
-
-class MCPTool(Protocol):
-    name: str
-    description: str
-    input_model: type[BaseModel]
-    output_model: type[BaseModel]
-
-    async def invoke(
-        self, arguments: BaseModel, context: MCPToolContext
-    ) -> BaseModel: ...
 
 
 class MCPToolSchema(BaseModel):
@@ -40,7 +37,7 @@ class MCPQueryRequest(BaseModel):
 
     data_source_id: UUID
     sql: str = Field(min_length=1, max_length=100_000)
-    limit: int | None = Field(default=None, ge=1, le=10_000)
+    limit: int | None = Field(default=None, ge=1, le=10_000_000)
 
 
 class MCPQueryResult(BaseModel):
@@ -50,3 +47,16 @@ class MCPQueryResult(BaseModel):
     rows: list[list[object]]
     row_count: int
     truncated: bool = False
+
+
+__all__ = [
+    "MCPDataSourceRequest",
+    "MCPDescribeTableRequest",
+    "MCPListTablesRequest",
+    "MCPQueryRequest",
+    "MCPQueryResult",
+    "MCPSampleRowsRequest",
+    "MCPTableRequest",
+    "MCPToolContext",
+    "MCPToolSchema",
+]

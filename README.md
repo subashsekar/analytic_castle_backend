@@ -112,6 +112,13 @@ CREATE DATABASE analyticcastle OWNER analyticcastle;
 | `SAMPLE_DATA_MAX_COLUMNS` | Maximum columns included in a sample (`100`) |
 | `SAMPLE_DATA_MAX_VALUE_CHARS` | Maximum characters returned for a single text sample value (`1024`) |
 | `SAMPLE_DATA_MAX_JSON_CHARS` | Maximum characters allowed for a serialized JSON sample value (`4096`) |
+| `MCP_QUERY_DEFAULT_LIMIT` | Default row limit for the PostgreSQL MCP query tool (`100`) |
+| `MCP_QUERY_MAX_LIMIT` | Maximum row limit for the PostgreSQL MCP query tool (`1000`) |
+| `MCP_QUERY_TIMEOUT_SECONDS` | Timeout for MCP query execution |
+| `MCP_QUERY_MAX_SQL_CHARS` | Maximum SQL length accepted by the MCP query tool |
+| `MCP_QUERY_MAX_RESULT_CHARS` | Maximum serialized MCP query result size |
+| `MCP_QUERY_MAX_VALUE_CHARS` | Maximum characters for a single MCP query cell |
+| `MCP_QUERY_MAX_JSON_CHARS` | Maximum characters for JSON/array MCP query values |
 | `DATA_SOURCE_ENCRYPTION_KEY` | 32-byte AES-256 key for customer data-source passwords (64-char hex or url-safe base64). Generate with `python -c "import secrets; print(secrets.token_hex(32))"`. Never reuse `JWT_SECRET_KEY`. |
 | `LLM_PROVIDER` | LLM provider (`openai`, `openrouter`, or `openai_compatible`) |
 | `LLM_API_KEY` | Provider API key. Never commit a real key. The API starts without one; AI chat then returns 503 |
@@ -219,6 +226,9 @@ Internal metadata search reads the same persisted metadata tables. It is scoped 
 Safe sample-data retrieval is an internal service. It loads a discovered table from AnalyticCastle metadata, runs a read-only `SELECT` with an explicit column list and SQL `LIMIT` through the existing PostgreSQL connector, then masks PII and secrets before returning rows. Default sample size is 10 rows (maximum 100). Callers cannot request unmasked values.
 
 The AI analyst exposes `POST /api/v1/ai/chat`. It authenticates the user, authorizes the workspace data source, detects a structured analytical intent, resolves relevant Phase 4 catalog metadata for that intent, and returns a non-executable request plan plus compact metadata context. It does not generate SQL, execute queries, or call the customer database. Unit tests use a fake provider. Live LLM tests run only when `TEST_LLM_API_KEY` is set.
+
+The in-process PostgreSQL MCP query tool (`postgres.query`) executes a single read-only SQL statement against an authorized data source through the existing connector. It does not accept connection strings or credentials as tool arguments. Query parameters are not supported; bind values are not interpolated into SQL. Live query tests run only when `TEST_POSTGRES_HOST` and related variables are set.
+
 
 ## Running Alembic
 

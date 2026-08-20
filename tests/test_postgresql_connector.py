@@ -15,6 +15,7 @@ from app.connectors import (
     DataConnector,
     PostgreSQLConnectionState,
     PostgreSQLConnector,
+    QueryResult,
     UnsupportedConnectorError,
     UnsupportedOperationError,
     connector_lifecycle,
@@ -142,9 +143,12 @@ def test_error_mapping_classifies_failures() -> None:
         psycopg.ProgrammingError("syntax error"),
         operation="query",
     )
+    query_timeout = map_postgres_error(TimeoutError(), operation="query")
 
     assert isinstance(timeout, ConnectorConnectionError)
     assert "timed out" in str(timeout)
+    assert isinstance(query_timeout, ConnectorQueryError)
+    assert "timed out" in str(query_timeout)
     assert isinstance(auth, ConnectorAuthenticationError)
     assert isinstance(refused, ConnectorConnectionError)
     assert "refused" in str(refused).lower()
@@ -312,7 +316,7 @@ def test_fetch_all_timeout_does_not_hang(
         finally:
             await connector.disconnect()
 
-    with pytest.raises(ConnectorConnectionError, match="timed out"):
+    with pytest.raises(ConnectorQueryError, match="timed out"):
         run_async(_run())
 
 
@@ -432,7 +436,7 @@ def test_fetch_sample_rows_timeout_does_not_hang(
         finally:
             await connector.disconnect()
 
-    with pytest.raises(ConnectorConnectionError, match="timed out"):
+    with pytest.raises(ConnectorQueryError, match="timed out"):
         run_async(_run())
 
 
@@ -571,6 +575,197 @@ def test_invalid_host_fails_quickly() -> None:
 
     assert SECRET not in str(exc_info.value)
     assert "OperationalError" not in str(exc_info.value)
+
+
+def test_execute_query_applies_database_row_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executed: list[tuple[object, object]] = []
+
+    class _Column:
+        name = "n"
+
+    class _Cursor:
+        def __init__(self) -> None:
+            self.description = [_Column()]
+
+        async def fetchmany(self, size: int) -> list[tuple[int]]:
+            assert size == 4
+            return [(1,), (2,), (3,), (4,)]
+
+        async def close(self) -> None:
+            return None
+
+    class _Connection:
+        closed = False
+
+        async def execute(self, query: object, params: object = None) -> _Cursor:
+            executed.append((str(query), params))
+            return _Cursor()
+
+        async def close(self) -> None:
+            return None
+
+    async def _fake_connect(**_kwargs: object) -> _Connection:
+        return _Connection()
+
+    monkeypatch.setattr(psycopg.AsyncConnection, "connect", _fake_connect)
+
+    async def _run() -> QueryResult:
+        connector = PostgreSQLConnector(connect_timeout=1)
+        await connector.connect(_config())
+        try:
+            return await connector.execute_query(
+                "SELECT n FROM numbers ORDER BY n", limit=3
+            )
+        finally:
+            await connector.disconnect()
+
+    result = run_async(_run())
+    assert result.truncated is True
+    assert result.rows == ((1,), (2,), (3,))
+    query, params = executed[0]
+    assert "LIMIT" in query.upper()
+    assert "OFFSET 0" in query.upper()
+    assert params == {"row_limit": 4}
+
+
+def test_execute_query_timeout_does_not_hang(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Connection:
+        closed = False
+
+        async def execute(self, query: object, params: object = None) -> None:
+            await asyncio.sleep(5)
+
+        async def close(self) -> None:
+            return None
+
+    async def _fake_connect(**_kwargs: object) -> _Connection:
+        return _Connection()
+
+    monkeypatch.setattr(psycopg.AsyncConnection, "connect", _fake_connect)
+
+    async def _run() -> None:
+        connector = PostgreSQLConnector(connect_timeout=0.2)
+        await connector.connect(_config())
+        try:
+            await connector.execute_query("SELECT 1")
+        finally:
+            await connector.disconnect()
+
+    with pytest.raises(ConnectorQueryError, match="timed out"):
+        run_async(_run())
+
+
+def test_execute_query_success_does_not_log_sql(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class _Column:
+        name = "email"
+
+    class _Cursor:
+        def __init__(self) -> None:
+            self.description = [_Column()]
+
+        async def fetchmany(self, size: int) -> list[tuple[str]]:
+            return [("a@example.com",)]
+
+        async def close(self) -> None:
+            return None
+
+    class _Connection:
+        closed = False
+
+        async def execute(self, query: object, params: object = None) -> _Cursor:
+            return _Cursor()
+
+        async def close(self) -> None:
+            return None
+
+    async def _fake_connect(**_kwargs: object) -> _Connection:
+        return _Connection()
+
+    monkeypatch.setattr(psycopg.AsyncConnection, "connect", _fake_connect)
+    logger = logging.getLogger("app.connectors.postgresql")
+    sql = "SELECT email FROM users WHERE email = 'victim@example.com'"
+
+    async def _run() -> QueryResult:
+        connector = PostgreSQLConnector(connect_timeout=1)
+        await connector.connect(_config())
+        try:
+            return await connector.execute_query(sql, limit=1)
+        finally:
+            await connector.disconnect()
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        result = run_async(_run())
+
+    assert result.rows == (("a@example.com",),)
+    text = caplog.text
+    assert sql not in text
+    assert "victim@example.com" not in text
+    assert "SELECT email" not in text
+
+
+def test_execute_query_failure_does_not_log_sql_or_parameters(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sensitive_sql = (
+        "SELECT ssn, email FROM customers "
+        "WHERE email = 'victim@example.com' AND token = 'super-secret-token'"
+    )
+    driver_message = (
+        f'syntax error at or near "AND"\n'
+        f"LINE 1: {sensitive_sql}\n"
+        f"HINT: parameters={{'row_limit': 2}}"
+    )
+
+    class _Connection:
+        closed = False
+
+        async def execute(self, query: object, params: object = None) -> None:
+            raise psycopg.ProgrammingError(driver_message)
+
+        async def close(self) -> None:
+            return None
+
+    async def _fake_connect(**_kwargs: object) -> _Connection:
+        return _Connection()
+
+    monkeypatch.setattr(psycopg.AsyncConnection, "connect", _fake_connect)
+    logger = logging.getLogger("app.connectors.postgresql")
+
+    async def _run() -> None:
+        connector = PostgreSQLConnector(connect_timeout=1)
+        await connector.connect(_config())
+        try:
+            await connector.execute_query(sensitive_sql, limit=1)
+        finally:
+            await connector.disconnect()
+
+    with (
+        caplog.at_level(logging.WARNING, logger=logger.name),
+        pytest.raises(ConnectorQueryError) as exc_info,
+    ):
+        run_async(_run())
+
+    # Sanitized application error must remain unchanged for callers.
+    assert str(exc_info.value) == "Unable to query the PostgreSQL data source"
+
+    text = caplog.text
+    assert "execute_query" in text
+    assert "ProgrammingError" in text
+    assert sensitive_sql not in text
+    assert "SELECT ssn" not in text
+    assert "victim@example.com" not in text
+    assert "super-secret-token" not in text
+    assert "row_limit" not in text
+    assert "LINE 1" not in text
+    assert "detail=" not in text
 
 
 def test_invalid_port_fails_cleanly() -> None:

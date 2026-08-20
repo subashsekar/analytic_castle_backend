@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Sequence
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -134,7 +134,9 @@ class OpenAICompatibleProvider:
             async with httpx.AsyncClient(
                 base_url=self._config.base_url,
                 timeout=self._config.timeout_seconds,
-                transport=self._transport,
+                # httpx exposes both sync and async transport base classes; cast
+                # here because this provider only uses `AsyncClient`.
+                transport=cast(httpx.AsyncBaseTransport | None, self._transport),
             ) as client:
                 response = await client.post(
                     _CHAT_COMPLETIONS_PATH,

@@ -1,17 +1,108 @@
 import asyncio
 import os
 import re
+import subprocess
 import sys
+import time
 import uuid
 from collections.abc import Coroutine, Generator
 from typing import TypeVar
 
-# Local PostgreSQL fallback for integration tests when DATABASE_URL is unset.
+# Local PostgreSQL fallbacks for tests when DATABASE_URL is unset.
 # Same non-secret local role as .env.example — not a production credential.
-os.environ.setdefault(
-    "DATABASE_URL",
-    "postgresql+psycopg://analyticcastle:analyticcastle@127.0.0.1:5432/analyticcastle",
+# Do not inherit a developer .env DATABASE_URL (it may point at a remote host).
+_LOCAL_TEST_DATABASE_URL = (
+    "postgresql+psycopg://analyticcastle:analyticcastle@127.0.0.1:5432/analyticcastle"
 )
+_DOCKER_TEST_DATABASE_URL = (
+    "postgresql+psycopg://analyticcastle:analyticcastle@127.0.0.1:5433/analyticcastle"
+)
+_DOCKER_CONTAINER = "analyticcastle-pytest-pg"
+
+
+def _psycopg_dsn(sqlalchemy_url: str) -> str:
+    return sqlalchemy_url.replace("postgresql+psycopg://", "postgresql://", 1)
+
+
+def _database_is_ready(sqlalchemy_url: str) -> bool:
+    import psycopg
+
+    try:
+        with psycopg.connect(
+            _psycopg_dsn(sqlalchemy_url),
+            connect_timeout=2,
+        ) as connection:
+            connection.execute("SELECT 1")
+        return True
+    except Exception:
+        return False
+
+
+def _start_docker_test_postgres() -> bool:
+    try:
+        inspect = subprocess.run(
+            ["docker", "inspect", "-f", "{{.State.Running}}", _DOCKER_CONTAINER],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if inspect.returncode == 0:
+            if inspect.stdout.strip() != "true":
+                subprocess.run(
+                    ["docker", "start", _DOCKER_CONTAINER],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+        else:
+            subprocess.run(
+                [
+                    "docker",
+                    "run",
+                    "-d",
+                    "--name",
+                    _DOCKER_CONTAINER,
+                    "-e",
+                    "POSTGRES_USER=analyticcastle",
+                    "-e",
+                    "POSTGRES_PASSWORD=analyticcastle",
+                    "-e",
+                    "POSTGRES_DB=analyticcastle",
+                    "-p",
+                    "5433:5432",
+                    "postgres:16-alpine",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return False
+    for _ in range(30):
+        if _database_is_ready(_DOCKER_TEST_DATABASE_URL):
+            return True
+        time.sleep(1)
+    return False
+
+
+def _configure_test_database_url() -> None:
+    explicit = os.environ.get("TEST_DATABASE_URL")
+    if explicit:
+        os.environ["DATABASE_URL"] = explicit
+        return
+    if _database_is_ready(_LOCAL_TEST_DATABASE_URL):
+        os.environ["DATABASE_URL"] = _LOCAL_TEST_DATABASE_URL
+        return
+    if _database_is_ready(_DOCKER_TEST_DATABASE_URL) or _start_docker_test_postgres():
+        os.environ["DATABASE_URL"] = _DOCKER_TEST_DATABASE_URL
+        return
+    current = os.environ.get("DATABASE_URL")
+    if current and _database_is_ready(current):
+        return
+    os.environ["DATABASE_URL"] = _LOCAL_TEST_DATABASE_URL
+
+
+_configure_test_database_url()
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault(
     "JWT_SECRET_KEY",

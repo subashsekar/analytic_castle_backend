@@ -614,6 +614,7 @@ def test_workspace_permission_enum_matches_documented_set() -> None:
         "member:update",
         "member:remove",
         "data_source:read",
+        "data_source:query",
         "data_source:create",
         "data_source:update",
         "data_source:delete",

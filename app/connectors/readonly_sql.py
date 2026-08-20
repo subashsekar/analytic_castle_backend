@@ -10,6 +10,7 @@ import re
 
 from app.connectors.exceptions import ConnectorQueryError
 from app.core.config import settings
+
 _CONTROL_HEAD = frozenset(
     {
         "insert",

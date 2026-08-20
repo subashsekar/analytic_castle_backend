@@ -135,6 +135,9 @@ class Settings(BaseSettings):
     RATE_LIMIT_METADATA_SYNC: str = "5/minute"
     RATE_LIMIT_SAMPLE_DATA: str = "10/minute"
     RATE_LIMIT_AI_CHAT: str = "10/minute"
+    RATE_LIMIT_MCP_QUERY: str = "10/minute"
+    RATE_LIMIT_MCP_SAMPLE: str = "10/minute"
+    RATE_LIMIT_MCP_METADATA: str = "30/minute"
     LOGIN_MAX_FAILED_ATTEMPTS: int = Field(default=5, ge=1)
     LOGIN_LOCKOUT_SECONDS: int = Field(default=60, ge=1)
 
@@ -245,6 +248,9 @@ class Settings(BaseSettings):
         "RATE_LIMIT_METADATA_SYNC",
         "RATE_LIMIT_SAMPLE_DATA",
         "RATE_LIMIT_AI_CHAT",
+        "RATE_LIMIT_MCP_QUERY",
+        "RATE_LIMIT_MCP_SAMPLE",
+        "RATE_LIMIT_MCP_METADATA",
     )
     @classmethod
     def validate_rate_limit_spec(cls, value: str) -> str:
@@ -360,6 +366,9 @@ class Settings(BaseSettings):
             "metadata-sync": self.RATE_LIMIT_METADATA_SYNC,
             "sample-data": self.RATE_LIMIT_SAMPLE_DATA,
             "ai-chat": self.RATE_LIMIT_AI_CHAT,
+            "mcp-query": self.RATE_LIMIT_MCP_QUERY,
+            "mcp-sample": self.RATE_LIMIT_MCP_SAMPLE,
+            "mcp-metadata": self.RATE_LIMIT_MCP_METADATA,
         }
         try:
             return mapping[scope]

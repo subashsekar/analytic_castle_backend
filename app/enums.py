@@ -22,6 +22,7 @@ class WorkspacePermission(str, enum.Enum):
     MEMBER_UPDATE = "member:update"
     MEMBER_REMOVE = "member:remove"
     DATA_SOURCE_READ = "data_source:read"
+    DATA_SOURCE_QUERY = "data_source:query"
     DATA_SOURCE_CREATE = "data_source:create"
     DATA_SOURCE_UPDATE = "data_source:update"
     DATA_SOURCE_DELETE = "data_source:delete"

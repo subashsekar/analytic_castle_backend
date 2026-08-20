@@ -111,6 +111,9 @@ def test_member_permissions_are_read_only() -> None:
         WorkspaceRole.MEMBER, WorkspacePermission.DATA_SOURCE_TEST
     )
     assert not workspace_role_has_permission(
+        WorkspaceRole.MEMBER, WorkspacePermission.DATA_SOURCE_QUERY
+    )
+    assert not workspace_role_has_permission(
         WorkspaceRole.MEMBER, WorkspacePermission.DATA_SOURCE_CREATE
     )
     assert not workspace_role_has_permission(
@@ -139,6 +142,9 @@ def test_workspace_admin_cannot_delete_workspace() -> None:
     )
     assert workspace_role_has_permission(
         WorkspaceRole.ADMIN, WorkspacePermission.DATA_SOURCE_DELETE
+    )
+    assert workspace_role_has_permission(
+        WorkspaceRole.ADMIN, WorkspacePermission.DATA_SOURCE_QUERY
     )
 
 

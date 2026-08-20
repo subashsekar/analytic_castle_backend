@@ -1,5 +1,3 @@
-from sqlalchemy.orm import Session
-
 from app.mcp.client import MCPClient
 from app.mcp.exceptions import (
     MCPError,
@@ -7,25 +5,29 @@ from app.mcp.exceptions import (
     MCPQueryRejectedError,
     MCPQueryResultError,
     MCPQueryTimeoutError,
+    MCPRateLimitError,
     MCPToolNotFoundError,
     MCPToolValidationError,
 )
 from app.mcp.registry import MCPRegistry
+from app.mcp.schemas import (
+    MCPQueryRequest,
+    MCPQueryResult,
+    MCPToolContext,
+    MCPToolSchema,
+)
+from app.mcp.server.lifecycle import build_postgres_mcp, shutdown_mcp
 from app.mcp.servers.postgres.server import PostgreSQLMCPServer
-from app.mcp.servers.postgres.tools.query import (
+from app.mcp.servers.postgres.tools import (
     POSTGRES_QUERY_TOOL_NAME,
+    POSTGRES_TOOL_NAMES,
     PostgresQueryTool,
 )
-from app.mcp.types import MCPQueryRequest, MCPQueryResult, MCPToolContext, MCPToolSchema
-
-
-def build_postgres_mcp(session: Session) -> tuple[MCPRegistry, MCPClient]:
-    registry = MCPRegistry()
-    PostgreSQLMCPServer(session).register(registry)
-    return registry, MCPClient(registry)
-
+from app.mcp.tools.base import MCPTool
 
 __all__ = [
+    "POSTGRES_QUERY_TOOL_NAME",
+    "POSTGRES_TOOL_NAMES",
     "MCPClient",
     "MCPError",
     "MCPQueryError",
@@ -34,13 +36,15 @@ __all__ = [
     "MCPQueryResult",
     "MCPQueryResultError",
     "MCPQueryTimeoutError",
+    "MCPRateLimitError",
     "MCPRegistry",
+    "MCPTool",
     "MCPToolContext",
     "MCPToolNotFoundError",
     "MCPToolSchema",
     "MCPToolValidationError",
-    "POSTGRES_QUERY_TOOL_NAME",
     "PostgreSQLMCPServer",
     "PostgresQueryTool",
     "build_postgres_mcp",
+    "shutdown_mcp",
 ]

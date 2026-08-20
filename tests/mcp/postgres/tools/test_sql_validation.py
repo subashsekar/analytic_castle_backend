@@ -72,3 +72,8 @@ def test_comments_cannot_hide_a_second_statement() -> None:
 def test_string_literals_are_not_treated_as_keywords() -> None:
     assert validate_readonly_sql("SELECT 'delete' AS note FROM users")
     assert validate_readonly_sql("SELECT $$ drop table users $$ AS note")
+    assert validate_readonly_sql("SELECT * FROM information_schema.tables")
+
+
+def test_leading_parenthesis_select_is_allowed() -> None:
+    assert validate_readonly_sql("(SELECT 1)")

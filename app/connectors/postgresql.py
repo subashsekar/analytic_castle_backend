@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Mapping, Sequence
 from enum import Enum
 from typing import Any, TypedDict
@@ -19,7 +20,7 @@ from app.connectors.exceptions import (
     sanitize_connector_message,
 )
 from app.connectors.readonly_sql import validate_readonly_sql
-from app.core.config import settings
+from app.connectors.registry import register_connector
 from app.connectors.types import (
     ColumnInfo,
     ConnectionTestResult,
@@ -28,6 +29,7 @@ from app.connectors.types import (
     SchemaInfo,
     TableInfo,
 )
+from app.core.config import settings
 from app.enums import DataSourceType
 
 logger = logging.getLogger(__name__)
@@ -91,8 +93,6 @@ class PostgreSQLConnectionState(str, Enum):
 
 
 def build_postgresql_connector() -> PostgreSQLConnector:
-    from app.core.config import settings
-
     return PostgreSQLConnector(connect_timeout=settings.POSTGRES_CONNECT_TIMEOUT)
 
 
@@ -136,7 +136,17 @@ def map_postgres_error(
 
     diagnostic = sanitize_connector_message(str(exc)).lower()
 
-    if isinstance(exc, psycopg.errors.QueryCanceled) and operation == "query":
+    if operation == "query" and (
+        isinstance(
+            exc,
+            (
+                TimeoutError,
+                asyncio.TimeoutError,
+                psycopg.errors.QueryCanceled,
+            ),
+        )
+        or _contains(diagnostic, _TIMEOUT_MARKERS)
+    ):
         return ConnectorQueryError("PostgreSQL query timed out")
 
     if isinstance(
@@ -184,13 +194,38 @@ def _contains(text: str, markers: tuple[str, ...]) -> bool:
     return any(marker in text for marker in markers)
 
 
-def _log_failure(exc: BaseException, *, host: str, port: int) -> None:
+def _log_failure(
+    exc: BaseException,
+    *,
+    host: str,
+    port: int,
+    operation: str,
+    include_detail: bool = True,
+) -> None:
+    """Log connector failures without leaking customer SQL when applicable.
+
+    Connect/auth failures may include sanitized driver detail (credentials are
+    redacted). Query execution failures must not log exception text because
+    PostgreSQL diagnostics often embed the submitted statement.
+    """
+
+    if include_detail:
+        logger.warning(
+            "PostgreSQL connector error error_type=%s operation=%s host=%s "
+            "port=%s detail=%s",
+            type(exc).__name__,
+            operation,
+            host,
+            port,
+            sanitize_connector_message(str(exc)),
+        )
+        return
     logger.warning(
-        "PostgreSQL connector error error_type=%s host=%s port=%s detail=%s",
+        "PostgreSQL connector error error_type=%s operation=%s host=%s port=%s",
         type(exc).__name__,
+        operation,
         host,
         port,
-        sanitize_connector_message(str(exc)),
     )
 
 
@@ -257,7 +292,12 @@ class PostgreSQLConnector:
         except (psycopg.Error, OSError, TimeoutError) as exc:
             self._connection = None
             self._state = PostgreSQLConnectionState.FAILED
-            _log_failure(exc, host=config.host, port=config.port)
+            _log_failure(
+                exc,
+                host=config.host,
+                port=config.port,
+                operation="connect",
+            )
             raise map_postgres_error(exc, operation="connect") from None
         self._state = PostgreSQLConnectionState.CONNECTED
 
@@ -287,7 +327,13 @@ class PostgreSQLConnector:
                 finally:
                     await cursor.close()
         except (psycopg.Error, OSError, TimeoutError) as exc:
-            _log_failure(exc, host="-", port=0)
+            _log_failure(
+                exc,
+                host="-",
+                port=0,
+                operation="test_connection",
+                include_detail=False,
+            )
             raise map_postgres_error(exc, operation="query") from None
         if row is None or row[0] != 1:
             raise ConnectorQueryError("Unable to query the PostgreSQL data source")
@@ -300,8 +346,7 @@ class PostgreSQLConnector:
     ) -> list[dict[str, Any]]:
         """Run a parameterized read-only SELECT for metadata discovery.
 
-        Not part of the public connector protocol. Arbitrary SQL execution
-        remains unsupported via ``execute_query``. Discovery uses this method
+        Not part of the public connector protocol. Discovery uses this method
         with static catalog queries and bound parameters.
         """
         validated = _require_readonly_select(query)
@@ -316,7 +361,13 @@ class PostgreSQLConnector:
                 finally:
                     await cursor.close()
         except (psycopg.Error, OSError, TimeoutError) as exc:
-            _log_failure(exc, host="-", port=0)
+            _log_failure(
+                exc,
+                host="-",
+                port=0,
+                operation="fetch_all",
+                include_detail=False,
+            )
             raise map_postgres_error(exc, operation="query") from None
         if description is None:
             return []
@@ -358,7 +409,13 @@ class PostgreSQLConnector:
                 finally:
                     await cursor.close()
         except (psycopg.Error, OSError, TimeoutError) as exc:
-            _log_failure(exc, host="-", port=0)
+            _log_failure(
+                exc,
+                host="-",
+                port=0,
+                operation="fetch_sample_rows",
+                include_detail=False,
+            )
             raise map_postgres_error(exc, operation="query") from None
         if description is None:
             return []
@@ -391,22 +448,25 @@ class PostgreSQLConnector:
         validated = validate_readonly_sql(query)
         row_limit = _resolve_query_limit(limit)
         connection = self._require_connection()
-        wrapped = sql.SQL(
-            "SELECT * FROM ({inner}) AS _analyticcastle_query LIMIT %(row_limit)s"
-        ).format(inner=sql.SQL(validated))
         fetch_limit = row_limit + 1
+        wrapped = _wrap_readonly_query(validated)
         try:
             async with asyncio.timeout(self._connect_timeout):
-                cursor = await connection.execute(
-                    wrapped, {"row_limit": fetch_limit}
-                )
+                cursor = await connection.execute(wrapped, {"row_limit": fetch_limit})
                 try:
-                    rows = await cursor.fetchall()
+                    rows = await cursor.fetchmany(fetch_limit)
                     description = cursor.description
                 finally:
                     await cursor.close()
         except (psycopg.Error, OSError, TimeoutError) as exc:
-            _log_failure(exc, host="-", port=0)
+            # Never log driver detail here: PostgreSQL errors often embed SQL.
+            _log_failure(
+                exc,
+                host="-",
+                port=0,
+                operation="execute_query",
+                include_detail=False,
+            )
             raise map_postgres_error(exc, operation="query") from None
         if description is None:
             return QueryResult(columns=(), rows=(), truncated=False)
@@ -442,6 +502,21 @@ def _require_pg_identifier(name: str) -> str:
 
 def _require_readonly_select(query: str) -> str:
     return validate_readonly_sql(query)
+
+
+def _wrap_readonly_query(validated: str) -> sql.Composed:
+    """Bound the result in SQL while preserving an outer ORDER BY when possible.
+
+    PostgreSQL ignores ORDER BY in a subquery unless LIMIT, OFFSET, or a row
+    lock is present. Appending OFFSET 0 keeps that order without adding a
+    second OFFSET clause when the statement already has one.
+    """
+    inner = validated
+    if not re.search(r"\boffset\b", inner, flags=re.IGNORECASE):
+        inner = f"{inner} OFFSET 0"
+    return sql.SQL(
+        "SELECT * FROM ({inner}) AS _analyticcastle_query LIMIT %(row_limit)s"
+    ).format(inner=sql.SQL(inner))
 
 
 def _resolve_query_limit(limit: int | None) -> int:

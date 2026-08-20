@@ -333,9 +333,15 @@ def test_metadata_api_rate_limit_defaults() -> None:
     assert configured.RATE_LIMIT_METADATA_SEARCH == "30/minute"
     assert configured.RATE_LIMIT_METADATA_SYNC == "5/minute"
     assert configured.RATE_LIMIT_SAMPLE_DATA == "10/minute"
+    assert configured.RATE_LIMIT_MCP_QUERY == "10/minute"
+    assert configured.RATE_LIMIT_MCP_SAMPLE == "10/minute"
+    assert configured.RATE_LIMIT_MCP_METADATA == "30/minute"
     assert configured.rate_limit_spec("metadata-search") == "30/minute"
     assert configured.rate_limit_spec("metadata-sync") == "5/minute"
     assert configured.rate_limit_spec("sample-data") == "10/minute"
+    assert configured.rate_limit_spec("mcp-query") == "10/minute"
+    assert configured.rate_limit_spec("mcp-sample") == "10/minute"
+    assert configured.rate_limit_spec("mcp-metadata") == "30/minute"
 
 
 def test_ai_limits_have_defaults() -> None:
@@ -364,6 +370,9 @@ def test_ai_limits_have_defaults() -> None:
     assert configured.AI_MAX_PLAN_FILTERS == 20
     assert configured.AI_MAX_FILTER_VALUES == 25
     assert configured.AI_MAX_CONCEPT_CHARS == 128
+    assert configured.MCP_QUERY_DEFAULT_LIMIT == 100
+    assert configured.MCP_QUERY_MAX_LIMIT == 1_000
+    assert configured.MCP_QUERY_TIMEOUT_SECONDS == 30.0
     assert configured.RATE_LIMIT_AI_CHAT == "10/minute"
     assert configured.rate_limit_spec("ai-chat") == "10/minute"
 
@@ -388,7 +397,15 @@ def test_ai_message_limit_must_be_positive() -> None:
         )
 
 
-def test_llm_provider_must_be_supported() -> None:
+def test_mcp_query_default_limit_cannot_exceed_max() -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            APP_ENV="local",
+            DATABASE_URL=settings.DATABASE_URL,
+            JWT_SECRET_KEY="change-me-to-a-long-random-secret-key",
+            MCP_QUERY_DEFAULT_LIMIT=500,
+            MCP_QUERY_MAX_LIMIT=100,
+        )
     with pytest.raises(ValidationError):
         Settings(
             APP_ENV="local",

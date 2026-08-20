@@ -32,6 +32,8 @@ _ADMIN_PERMISSIONS = _MEMBER_PERMISSIONS | frozenset(
         WorkspacePermission.DATA_SOURCE_CREATE,
         WorkspacePermission.DATA_SOURCE_UPDATE,
         WorkspacePermission.DATA_SOURCE_DELETE,
+        # Unmasked analytical SQL is higher risk than metadata/sample reads.
+        WorkspacePermission.DATA_SOURCE_QUERY,
     }
 )
 _OWNER_PERMISSIONS = _ADMIN_PERMISSIONS | frozenset(

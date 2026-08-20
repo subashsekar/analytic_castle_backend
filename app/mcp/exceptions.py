@@ -26,7 +26,9 @@ class MCPQueryError(MCPError):
 
 
 class MCPQueryRejectedError(MCPQueryError):
-    def __init__(self, message: str = "Only a single read-only query is allowed") -> None:
+    def __init__(
+        self, message: str = "Only a single read-only query is allowed"
+    ) -> None:
         super().__init__(message)
 
 
@@ -37,4 +39,34 @@ class MCPQueryTimeoutError(MCPQueryError):
 
 class MCPQueryResultError(MCPQueryError):
     def __init__(self, message: str = "The query result is too large") -> None:
+        super().__init__(message)
+
+
+class MCPUnauthorizedError(MCPError):
+    def __init__(self, message: str = "Not authenticated") -> None:
+        super().__init__(message)
+
+
+class MCPAccessDeniedError(MCPError):
+    """Denial used for workspace/data-source authorization.
+
+    Messages intentionally avoid leaking whether the target resource exists.
+    """
+
+    def __init__(self, message: str = "Data source not found") -> None:
+        super().__init__(message)
+
+
+class MCPServerNotFoundError(MCPError):
+    def __init__(self, message: str = "MCP server was not found") -> None:
+        super().__init__(message)
+
+
+class MCPToolNameValidationError(MCPToolValidationError):
+    def __init__(self, message: str = "MCP tool name is invalid") -> None:
+        super().__init__(message)
+
+
+class MCPRateLimitError(MCPError):
+    def __init__(self, message: str = "Too many MCP requests") -> None:
         super().__init__(message)
