@@ -11,15 +11,24 @@ from uuid import UUID
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 
-from app.connectors import ConnectorConfig, ConnectorError, ConnectorQueryError
+from app.connectors import (
+    ConnectorConfig,
+    ConnectorConnectionError,
+    ConnectorError,
+    ConnectorQueryError,
+)
 from app.connectors.base import connector_lifecycle
 from app.connectors.postgresql import PostgreSQLConnector
 from app.connectors.readonly_sql import validate_readonly_sql
 from app.connectors.types import QueryResult
 from app.enums import DataSourceType
 from app.mcp.config import mcp_settings
+from app.mcp.error_codes import MCPErrorCategory, MCPErrorCode
 from app.mcp.exceptions import (
     MCPAccessDeniedError,
+    MCPDatabaseError,
+    MCPDatabaseUnavailableError,
+    MCPError,
     MCPQueryError,
     MCPQueryRejectedError,
     MCPQueryResultError,
@@ -97,21 +106,24 @@ class PostgresQueryTool:
         except MCPAccessDeniedError as exc:
             # Map authorization denial into the same safe error the rest of the
             # query path uses for unknown/foreign data sources.
-            raise MCPQueryError(str(exc)) from exc
+            raise MCPQueryError(
+                str(exc),
+                code=MCPErrorCode.MCP_DATA_SOURCE_NOT_FOUND,
+                category=MCPErrorCategory.NOT_FOUND,
+            ) from exc
 
         row_limit = _resolve_limit(request.limit)
         config = self._load_config(request.data_source_id, resolved_workspace_id)
         try:
             raw = await self._executor(config, request.sql, row_limit)
         except ConnectorQueryError as exc:
-            message = str(exc).lower()
-            if "timed out" in message:
-                raise MCPQueryTimeoutError("The query timed out") from exc
-            raise MCPQueryError("Read-only query failed") from exc
+            raise _map_query_connector_error(exc) from exc
         except TimeoutError as exc:
             raise MCPQueryTimeoutError("The query timed out") from exc
+        except ConnectorConnectionError as exc:
+            raise _map_connection_error(exc) from exc
         except ConnectorError as exc:
-            raise MCPQueryError("Read-only query failed") from exc
+            raise MCPDatabaseError() from exc
 
         result = _serialize_result(raw)
         duration_ms = (time.perf_counter() - started) * 1000
@@ -133,17 +145,31 @@ class PostgresQueryTool:
                 workspace_id=workspace_id,
             )
         except DataSourceNotFoundError as exc:
-            raise MCPQueryError("Data source not found") from exc
+            raise MCPQueryError(
+                "Data source not found",
+                code=MCPErrorCode.MCP_DATA_SOURCE_NOT_FOUND,
+                category=MCPErrorCategory.NOT_FOUND,
+            ) from exc
         except ConnectionConfigurationError as exc:
             raise MCPQueryError(
-                "Data source connection configuration is invalid"
+                "Data source connection configuration is invalid",
+                code=MCPErrorCode.MCP_CONFIGURATION_ERROR,
+                category=MCPErrorCategory.DATA_SOURCE_ERROR,
             ) from exc
         if data_source.type is not DataSourceType.POSTGRESQL:
-            raise MCPQueryError("Read-only query is not supported for this connector")
+            raise MCPQueryError(
+                "Read-only query is not supported for this connector",
+                code=MCPErrorCode.MCP_QUERY_INVALID,
+                category=MCPErrorCategory.QUERY_ERROR,
+            )
         try:
             return connector_config_from_connection(connection)
         except CredentialError as exc:
-            raise MCPQueryError("Unable to load data source credentials") from exc
+            raise MCPQueryError(
+                "Unable to load data source credentials",
+                code=MCPErrorCode.MCP_DATABASE_ERROR,
+                category=MCPErrorCategory.DATA_SOURCE_ERROR,
+            ) from exc
 
 
 async def _execute_with_connector(
@@ -203,3 +229,17 @@ def _encoded_size(value: object) -> int:
         return len(json.dumps(value, default=str, ensure_ascii=False))
     except (TypeError, ValueError) as exc:
         raise MCPQueryResultError("Unable to serialize query result") from exc
+
+
+def _map_query_connector_error(exc: ConnectorQueryError) -> MCPQueryError:
+    message = str(exc).lower()
+    if "timed out" in message:
+        return MCPQueryTimeoutError("The query timed out")
+    return MCPQueryError("Read-only query failed")
+
+
+def _map_connection_error(exc: ConnectorConnectionError) -> MCPError:
+    message = str(exc).lower()
+    if "unavailable" in message or "timed out" in message:
+        return MCPDatabaseUnavailableError()
+    return MCPDatabaseError()

@@ -513,3 +513,97 @@ def test_query_logs_omit_sql_and_secrets(
     assert "SELECT email" not in combined
     assert SECRET not in combined
     assert str(source.id) in combined
+
+
+def test_database_connection_failures_map_safely(
+    db_session: Session,
+    workspace: Workspace,
+    test_user: User,
+    workspace_member: object,
+) -> None:
+    from app.connectors.exceptions import ConnectorConnectionError, ConnectorQueryError
+    from app.mcp.exceptions import MCPDatabaseError, MCPDatabaseUnavailableError
+
+    source = _connected_source(db_session, workspace, test_user)
+    context = MCPToolContext(workspace_id=workspace.id, user_id=test_user.id)
+
+    async def _run() -> None:
+        with pytest.raises(MCPDatabaseUnavailableError):
+            await PostgresQueryTool(
+                db_session,
+                executor=_failing_executor(
+                    ConnectorConnectionError("connection timed out")
+                ),
+            ).execute(
+                MCPQueryRequest(data_source_id=source.id, sql="SELECT 1"),
+                context,
+            )
+        with pytest.raises(MCPDatabaseError):
+            await PostgresQueryTool(
+                db_session,
+                executor=_failing_executor(
+                    ConnectorConnectionError("authentication failed")
+                ),
+            ).execute(
+                MCPQueryRequest(data_source_id=source.id, sql="SELECT 1"),
+                context,
+            )
+        with pytest.raises(MCPQueryError):
+            await PostgresQueryTool(
+                db_session,
+                executor=_failing_executor(ConnectorQueryError("syntax error")),
+            ).execute(
+                MCPQueryRequest(data_source_id=source.id, sql="SELECT 1"),
+                context,
+            )
+        with pytest.raises(MCPQueryTimeoutError):
+            await PostgresQueryTool(
+                db_session,
+                executor=_failing_executor(ConnectorQueryError("query timed out")),
+            ).execute(
+                MCPQueryRequest(data_source_id=source.id, sql="SELECT 1"),
+                context,
+            )
+
+    run_async(_run())
+
+
+def test_empty_and_oversized_sql_rejected(
+    db_session: Session,
+    workspace: Workspace,
+    test_user: User,
+    workspace_member: object,
+) -> None:
+    source = _connected_source(db_session, workspace, test_user)
+    context = MCPToolContext(workspace_id=workspace.id, user_id=test_user.id)
+
+    async def _run() -> None:
+        with pytest.raises(ValidationError):
+            MCPQueryRequest(data_source_id=source.id, sql="")
+        with pytest.raises(ValidationError):
+            MCPQueryRequest(data_source_id=source.id, sql="x" * 100_001)
+        # Valid length but invalid SQL still rejected before executor.
+        calls: list[object] = []
+
+        async def _track(config: object, sql: str, limit: int) -> QueryResult:
+            calls.append(sql)
+            return await _fake_ok(config, sql, limit)
+
+        with pytest.raises(MCPQueryRejectedError):
+            await PostgresQueryTool(db_session, executor=_track).execute(
+                MCPQueryRequest(
+                    data_source_id=source.id, sql="INSERT INTO t VALUES (1)"
+                ),
+                context,
+            )
+        assert calls == []
+
+    run_async(_run())
+
+
+def _failing_executor(error: Exception):
+    async def _execute(config: object, sql: str, limit: int) -> QueryResult:
+        del config, sql, limit
+        raise error
+
+    return _execute

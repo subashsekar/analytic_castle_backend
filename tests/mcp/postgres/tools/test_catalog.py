@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
+from app.db.models import Organization, User, Workspace
 from app.enums import DataSourceTableType
 from app.mcp import (
     POSTGRES_TOOL_NAMES,
@@ -29,7 +30,6 @@ from app.mcp.servers.postgres.tools.tables import (
     PostgresDescribeTableTool,
     PostgresListTablesTool,
 )
-from app.db.models import Organization, User, Workspace
 from app.services.metadata_catalog_types import (
     ColumnRecord,
     MetadataPage,
@@ -298,7 +298,7 @@ def test_client_invokes_list_schemas(
 ) -> None:
     source = _source(db_session, workspace, test_user)
     _schema(db_session, source, "public")
-    registry, client = build_postgres_mcp(db_session)
+    _, client = build_postgres_mcp(db_session)
 
     async def _run() -> None:
         payload = await client.call_tool(

@@ -5,8 +5,12 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
-from app.mcp.exceptions import MCPToolNotFoundError
-from app.mcp.exceptions import MCPServerNotFoundError, MCPToolNameValidationError
+
+from app.mcp.exceptions import (
+    MCPServerNotFoundError,
+    MCPToolNameValidationError,
+    MCPToolNotFoundError,
+)
 from app.mcp.schemas import MCPToolSchema
 from app.mcp.security import MCPToolPermission
 from app.mcp.tools.base import MCPTool
@@ -29,7 +33,7 @@ class MCPRegistry:
         try:
             return self._servers[name]
         except KeyError as exc:
-            raise MCPToolNotFoundError("MCP server was not found") from exc
+            raise MCPServerNotFoundError("MCP server was not found") from exc
 
     def list_servers(self) -> tuple[MCPServer, ...]:
         return tuple(self._servers[name] for name in sorted(self._servers))
@@ -44,7 +48,7 @@ class MCPRegistry:
     def get(self, name: str) -> MCPTool:
         return self.get_record(name).handler
 
-    def get_record(self, name: str) -> "_MCPRegisteredTool":
+    def get_record(self, name: str) -> _MCPRegisteredTool:
         self._validate_tool_name(name)
         server = name.split(".", 1)[0]
         if server not in self._servers:
@@ -88,10 +92,10 @@ class _MCPRegisteredTool:
     output_model: type[object]
 
     @classmethod
-    def from_tool(cls, *, tool: MCPTool, server_name: str) -> "_MCPRegisteredTool":
+    def from_tool(cls, *, tool: MCPTool, server_name: str) -> _MCPRegisteredTool:
         permission = getattr(tool, "permission", None)
         if not isinstance(permission, MCPToolPermission):
-            raise ValueError(f"MCP tool {tool.name} has no permission policy")
+            raise TypeError(f"MCP tool {tool.name} has no permission policy")
         return cls(
             name=tool.name,
             server_name=server_name,

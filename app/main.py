@@ -21,6 +21,8 @@ from app.core.middleware import (
     SecurityHeadersMiddleware,
 )
 from app.core.request_id import REQUEST_ID_HEADER, get_request_id, new_request_id
+from app.mcp.errors import error_response_dict, http_status_for
+from app.mcp.exceptions import MCPError, MCPRateLimitError
 
 # psycopg async requires SelectorEventLoop on Windows. Uvicorn sets this too;
 # keep it here so FastAPI TestClient and other ASGI servers also work.
@@ -63,6 +65,22 @@ def _request_id_for(request: Request) -> str:
     if contextual and contextual != "-":
         return contextual
     return new_request_id()
+
+
+@app.exception_handler(MCPError)
+async def mcp_exception_handler(request: Request, exc: MCPError) -> JSONResponse:
+    """Map MCP failures to safe structured JSON without leaking internals."""
+
+    request_id = exc.request_id if exc.request_id else _request_id_for(request)
+    content = error_response_dict(exc, request_id=request_id)
+    headers: dict[str, str] = {REQUEST_ID_HEADER: request_id}
+    if isinstance(exc, MCPRateLimitError) and exc.retry_after:
+        headers["Retry-After"] = str(exc.retry_after)
+    return JSONResponse(
+        status_code=http_status_for(exc),
+        content=content,
+        headers=headers,
+    )
 
 
 @app.exception_handler(Exception)

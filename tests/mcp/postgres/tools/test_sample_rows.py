@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
+from app.db.models import User, Workspace
 from app.enums import ColumnSensitivity, DataSourceTableType
 from app.mcp import MCPError, MCPToolContext, build_postgres_mcp
 from app.mcp.exceptions import MCPToolValidationError
@@ -17,7 +18,6 @@ from app.mcp.servers.postgres.tools.sample_rows import (
 from app.services.data_masking import REDACTED
 from app.services.sample_data_exceptions import SampleDataLimitError
 from app.services.sample_data_types import SampleColumn, SampleDataResult
-from app.db.models import User, Workspace
 from tests.conftest import run_async
 from tests.test_ai_metadata import _source
 

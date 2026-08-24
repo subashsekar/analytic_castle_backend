@@ -124,7 +124,7 @@ def enforce_mcp_rate_limit(
     limit, window_seconds = parse_rate_limit(settings.rate_limit_spec(scope))
     result = rate_limiter.hit(f"mcp:{scope}:{user_id}", limit, window_seconds)
     if not result.allowed:
-        raise MCPRateLimitError()
+        raise MCPRateLimitError(retry_after=result.retry_after)
 
 
 __all__ = [

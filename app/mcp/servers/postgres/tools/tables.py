@@ -6,8 +6,8 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.mcp.schemas import (
-    MCPListTablesRequest,
     MCPDescribeTableRequest,
+    MCPListTablesRequest,
     MCPToolContext,
 )
 from app.mcp.security import MCPToolPermission, resolve_authorized_workspace_id
