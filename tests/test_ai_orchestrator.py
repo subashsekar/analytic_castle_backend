@@ -9,7 +9,6 @@ from app.ai.exceptions import (
     AIContextError,
     AIProviderError,
     AIRequestValidationError,
-    AIResponseValidationError,
 )
 from app.ai.orchestrator import AIAnalystOrchestrator, build_prompt_messages
 from app.ai.types import (
@@ -154,15 +153,16 @@ def test_orchestrator_maps_provider_error() -> None:
     run_async(_run())
 
 
-def test_orchestrator_rejects_invalid_llm_response() -> None:
+def test_orchestrator_asks_clarification_on_invalid_llm_response() -> None:
     provider = FakeLLMProvider()
     provider.invalid_content = "I am not JSON, just a helpful sentence."
     context = _context()
     request = AIRequest(message="Hello", data_source_id=context.data_source_id)
 
     async def _run() -> None:
-        with pytest.raises(AIResponseValidationError):
-            await AIAnalystOrchestrator(provider).chat(request, context)
+        response = await AIAnalystOrchestrator(provider).chat(request, context)
+        assert response.intent.requires_clarification is True
+        assert response.intent.intent.value == "UNKNOWN"
 
     run_async(_run())
 

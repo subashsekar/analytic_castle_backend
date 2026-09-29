@@ -75,5 +75,21 @@ def test_string_literals_are_not_treated_as_keywords() -> None:
     assert validate_readonly_sql("SELECT * FROM information_schema.tables")
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        "SELECT pg_sleep(5)",
+        "SELECT pg_read_file('/etc/passwd')",
+        "SELECT dblink('dbname=x', 'SELECT 1')",
+        "SELECT lo_import('/tmp/x')",
+        "SELECT set_config('x', 'y', false)",
+        "SELECT current_setting('is_superuser')",
+    ],
+)
+def test_dangerous_functions_are_rejected(query: str) -> None:
+    with pytest.raises(ConnectorQueryError):
+        validate_readonly_sql(query)
+
+
 def test_leading_parenthesis_select_is_allowed() -> None:
     assert validate_readonly_sql("(SELECT 1)")

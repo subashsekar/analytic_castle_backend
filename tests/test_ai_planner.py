@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.ai.intent import normalize_intent
 from app.ai.intent_types import (
+    AggregationType,
     AIConfidence,
     AIDimension,
     AIFilter,
@@ -12,7 +13,6 @@ from app.ai.intent_types import (
     AIPlanCapability,
     AIPlanOperation,
     AITimeRange,
-    AggregationType,
     FilterOperator,
     LLMIntentDetection,
     TimeRangePreset,

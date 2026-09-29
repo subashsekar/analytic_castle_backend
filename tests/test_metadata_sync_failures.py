@@ -145,7 +145,11 @@ def test_invalid_discovery_result_fails_without_persisting(db_session: Session) 
             service.synchronize(data_source.id, workspace_id=data_source.workspace_id)
         )
 
-    assert db_session.scalar(select(func.count()).select_from(DataSourceSchema)) == 0
+    assert db_session.scalar(
+        select(func.count())
+        .select_from(DataSourceSchema)
+        .where(DataSourceSchema.data_source_id == data_source.id)
+    ) == 0
     status = service.get_status(data_source.id, workspace_id=data_source.workspace_id)
     assert status.status is MetadataSyncStatus.FAILED
 
@@ -168,7 +172,14 @@ def test_connection_failure_sets_failed_status(db_session: Session) -> None:
     status = service.get_status(data_source.id, workspace_id=data_source.workspace_id)
     assert status.status is MetadataSyncStatus.FAILED
     assert status.error_message == "Unable to connect to the data source"
-    assert db_session.scalar(select(func.count()).select_from(DataSourceSchema)) == 0
+    assert (
+        db_session.scalar(
+            select(func.count())
+            .select_from(DataSourceSchema)
+            .where(DataSourceSchema.data_source_id == data_source.id)
+        )
+        == 0
+    )
 
 
 def test_sync_errors_and_logs_omit_credentials(

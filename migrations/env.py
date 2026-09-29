@@ -3,6 +3,9 @@ from sqlalchemy import engine_from_config, pool
 
 from app.core.config import settings
 from app.db.models import (  # noqa: F401
+    AgentState,
+    AnalysisSession,
+    ConversationContext,
     DataSource,
     DataSourceColumn,
     DataSourceConnection,

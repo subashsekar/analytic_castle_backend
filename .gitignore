@@ -18,3 +18,8 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 .stackpilot/
+
+# Local tool / audit capture files
+*_out.txt
+*_reaudit_out.txt
+*_fail_check.txt

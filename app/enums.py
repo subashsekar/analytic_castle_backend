@@ -69,8 +69,32 @@ class MetadataSearchType(str, enum.Enum):
     COLUMN = "COLUMN"
 
 
+class AnalysisSessionStatus(str, enum.Enum):
+    ACTIVE = "ACTIVE"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+class QueryHistoryStatus(str, enum.Enum):
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    REJECTED = "REJECTED"
+    CORRECTED = "CORRECTED"
+
+
 class ColumnSensitivity(str, enum.Enum):
     PUBLIC = "PUBLIC"
     SENSITIVE = "SENSITIVE"
     PII = "PII"
     SECRET = "SECRET"
+
+
+class AgentPhase(str, enum.Enum):
+    INITIAL = "INITIAL"
+    INTENT = "INTENT"
+    PLANNING = "PLANNING"
+    AWAITING_CLARIFICATION = "AWAITING_CLARIFICATION"
+    EXECUTING = "EXECUTING"
+    RESPONDING = "RESPONDING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"

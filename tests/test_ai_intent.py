@@ -5,9 +5,9 @@ import uuid
 import pytest
 from pydantic import ValidationError
 
-from app.ai.exceptions import AIResponseValidationError
 from app.ai.intent import AIIntentService, normalize_intent
 from app.ai.intent_types import (
+    AggregationType,
     AIConfidence,
     AIDimension,
     AIFilter,
@@ -15,7 +15,6 @@ from app.ai.intent_types import (
     AIMetric,
     AIOperationType,
     AITimeRange,
-    AggregationType,
     FilterOperator,
     LLMIntentDetection,
     TimeRangePreset,
@@ -204,15 +203,76 @@ def test_filter_operators_are_accepted(
     assert "LIKE" not in str(dumped.get("operator"))
 
 
-@pytest.mark.parametrize("raw_operator", ["=", "!=", "<>", "LIKE", ">", "<", "IN SQL"])
-def test_raw_sql_filter_operators_are_rejected(raw_operator: str) -> None:
+@pytest.mark.parametrize(
+    ("raw_operator", "expected"),
+    [
+        ("=", FilterOperator.EQUALS),
+        ("!=", FilterOperator.NOT_EQUALS),
+        ("<>", FilterOperator.NOT_EQUALS),
+        (">", FilterOperator.GREATER_THAN),
+        ("<", FilterOperator.LESS_THAN),
+        ("LIKE", FilterOperator.CONTAINS),
+    ],
+)
+def test_common_filter_operator_aliases_are_accepted(
+    raw_operator: str, expected: FilterOperator
+) -> None:
+    item = AIFilter(field="country", operator=raw_operator, value="India")
+    assert item.operator is expected
+
+
+def test_invalid_filter_operator_is_rejected() -> None:
     with pytest.raises(ValidationError):
-        AIFilter(field="country", operator=raw_operator, value="India")
+        AIFilter(field="country", operator="IN SQL", value="India")
 
 
 def test_filter_field_cannot_contain_sql() -> None:
     with pytest.raises(ValidationError):
         AIFilter(field="country; drop table users", operator="equals", value="India")
+
+
+def test_messy_llm_intent_payload_is_coerced() -> None:
+    detected = LLMIntentDetection.model_validate(
+        {
+            "intent": "report",
+            "operation": "MAKE_REPORT",
+            "metrics": ["applications"],
+            "dimensions": ["status"],
+            "filters": [
+                {"field": "country", "operator": "=", "value": "India"},
+                {"field": "broken", "operator": "IN SQL", "value": "x"},
+            ],
+            "sort": {"field": "applications", "direction": "descending"},
+            "time_range": {"preset": "last_30_days"},
+            "requires_clarification": "false",
+            "confidence": "medium",
+        }
+    )
+    assert detected.intent is AIIntentType.SUMMARY
+    assert detected.operation is None
+    assert detected.metrics[0].name == "applications"
+    assert detected.dimensions[0].name == "status"
+    assert len(detected.filters) == 1
+    assert detected.filters[0].operator is FilterOperator.EQUALS
+    assert detected.sort is not None
+    assert detected.sort.direction.value == "desc"
+    assert detected.time_range is None
+    assert detected.requires_clarification is True
+
+
+def test_unknown_intent_token_coerces_to_unknown_clarification() -> None:
+    detected = LLMIntentDetection.model_validate({"intent": "NOT_AN_INTENT"})
+    assert detected.intent is AIIntentType.UNKNOWN
+    assert detected.requires_clarification is True
+    assert detected.clarification_question
+
+
+def test_invalid_structured_intent_asks_for_clarification() -> None:
+    provider = FakeLLMProvider()
+    provider.structured_payload = {"intent": True, "metrics": "not-a-list"}
+    result = _detect(provider, "Give me a report.")
+    assert result.intent.intent is AIIntentType.UNKNOWN  # type: ignore[attr-defined]
+    assert result.intent.requires_clarification is True  # type: ignore[attr-defined]
 
 
 @pytest.mark.parametrize("preset", list(TimeRangePreset))
@@ -271,18 +331,12 @@ def test_too_many_metrics_are_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
         normalize_intent(detected)
 
 
-def test_malformed_intent_raises_validation_error() -> None:
-    provider = FakeLLMProvider()
-    provider.structured_payload = {"intent": "NOT_AN_INTENT"}
-    with pytest.raises(AIResponseValidationError):
-        _detect(provider, "Show total sales.")
-
-
-def test_missing_intent_field_is_rejected() -> None:
+def test_missing_intent_field_asks_for_clarification() -> None:
     provider = FakeLLMProvider()
     provider.structured_payload = {"operation": "COUNT", "subject": "customers"}
-    with pytest.raises(AIResponseValidationError):
-        _detect(provider, "How many customers do we have?")
+    result = _detect(provider, "How many customers do we have?")
+    assert result.intent.intent is AIIntentType.UNKNOWN  # type: ignore[attr-defined]
+    assert result.intent.requires_clarification is True  # type: ignore[attr-defined]
 
 
 def test_prompt_injection_skips_llm() -> None:

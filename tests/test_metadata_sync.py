@@ -372,10 +372,39 @@ def test_repeated_sync_is_idempotent(db_session: Session) -> None:
     first = run_async(
         service.synchronize(data_source.id, workspace_id=data_source.workspace_id)
     )
-    schema_ids = set(db_session.scalars(select(DataSourceSchema.id)).all())
-    table_ids = set(db_session.scalars(select(DataSourceTable.id)).all())
-    column_ids = set(db_session.scalars(select(DataSourceColumn.id)).all())
-    relationship_ids = set(db_session.scalars(select(DataSourceRelationship.id)).all())
+    schema_ids = set(
+        db_session.scalars(
+            select(DataSourceSchema.id).where(
+                DataSourceSchema.data_source_id == data_source.id
+            )
+        ).all()
+    )
+    table_ids = set(
+        db_session.scalars(
+            select(DataSourceTable.id)
+            .join(DataSourceSchema, DataSourceTable.schema_id == DataSourceSchema.id)
+            .where(DataSourceSchema.data_source_id == data_source.id)
+        ).all()
+    )
+    column_ids = set(
+        db_session.scalars(
+            select(DataSourceColumn.id)
+            .join(DataSourceTable, DataSourceColumn.table_id == DataSourceTable.id)
+            .join(DataSourceSchema, DataSourceTable.schema_id == DataSourceSchema.id)
+            .where(DataSourceSchema.data_source_id == data_source.id)
+        ).all()
+    )
+    relationship_ids = set(
+        db_session.scalars(
+            select(DataSourceRelationship.id)
+            .join(
+                DataSourceTable,
+                DataSourceRelationship.source_table_id == DataSourceTable.id,
+            )
+            .join(DataSourceSchema, DataSourceTable.schema_id == DataSourceSchema.id)
+            .where(DataSourceSchema.data_source_id == data_source.id)
+        ).all()
+    )
 
     second = run_async(
         service.synchronize(data_source.id, workspace_id=data_source.workspace_id)
@@ -383,17 +412,95 @@ def test_repeated_sync_is_idempotent(db_session: Session) -> None:
 
     assert first.status is MetadataSyncStatus.SUCCESS
     assert second.status is MetadataSyncStatus.SUCCESS
-    assert db_session.scalar(select(func.count()).select_from(DataSourceSchema)) == 1
-    assert db_session.scalar(select(func.count()).select_from(DataSourceTable)) == 2
-    assert db_session.scalar(select(func.count()).select_from(DataSourceColumn)) == 4
     assert (
-        db_session.scalar(select(func.count()).select_from(DataSourceRelationship)) == 1
+        db_session.scalar(
+            select(func.count())
+            .select_from(DataSourceSchema)
+            .where(DataSourceSchema.data_source_id == data_source.id)
+        )
+        == 1
     )
-    assert set(db_session.scalars(select(DataSourceSchema.id)).all()) == schema_ids
-    assert set(db_session.scalars(select(DataSourceTable.id)).all()) == table_ids
-    assert set(db_session.scalars(select(DataSourceColumn.id)).all()) == column_ids
     assert (
-        set(db_session.scalars(select(DataSourceRelationship.id)).all())
+        db_session.scalar(
+            select(func.count())
+            .select_from(DataSourceTable)
+            .join(DataSourceSchema, DataSourceTable.schema_id == DataSourceSchema.id)
+            .where(DataSourceSchema.data_source_id == data_source.id)
+        )
+        == 2
+    )
+    assert (
+        db_session.scalar(
+            select(func.count())
+            .select_from(DataSourceColumn)
+            .join(DataSourceTable, DataSourceColumn.table_id == DataSourceTable.id)
+            .join(DataSourceSchema, DataSourceTable.schema_id == DataSourceSchema.id)
+            .where(DataSourceSchema.data_source_id == data_source.id)
+        )
+        == 4
+    )
+    assert (
+        db_session.scalar(
+            select(func.count())
+            .select_from(DataSourceRelationship)
+            .join(
+                DataSourceTable,
+                DataSourceRelationship.source_table_id == DataSourceTable.id,
+            )
+            .join(DataSourceSchema, DataSourceTable.schema_id == DataSourceSchema.id)
+            .where(DataSourceSchema.data_source_id == data_source.id)
+        )
+        == 1
+    )
+    assert (
+        set(
+            db_session.scalars(
+                select(DataSourceSchema.id).where(
+                    DataSourceSchema.data_source_id == data_source.id
+                )
+            ).all()
+        )
+        == schema_ids
+    )
+    assert (
+        set(
+            db_session.scalars(
+                select(DataSourceTable.id)
+                .join(
+                    DataSourceSchema, DataSourceTable.schema_id == DataSourceSchema.id
+                )
+                .where(DataSourceSchema.data_source_id == data_source.id)
+            ).all()
+        )
+        == table_ids
+    )
+    assert (
+        set(
+            db_session.scalars(
+                select(DataSourceColumn.id)
+                .join(DataSourceTable, DataSourceColumn.table_id == DataSourceTable.id)
+                .join(
+                    DataSourceSchema, DataSourceTable.schema_id == DataSourceSchema.id
+                )
+                .where(DataSourceSchema.data_source_id == data_source.id)
+            ).all()
+        )
+        == column_ids
+    )
+    assert (
+        set(
+            db_session.scalars(
+                select(DataSourceRelationship.id)
+                .join(
+                    DataSourceTable,
+                    DataSourceRelationship.source_table_id == DataSourceTable.id,
+                )
+                .join(
+                    DataSourceSchema, DataSourceTable.schema_id == DataSourceSchema.id
+                )
+                .where(DataSourceSchema.data_source_id == data_source.id)
+            ).all()
+        )
         == relationship_ids
     )
 
@@ -572,13 +679,22 @@ def test_sync_applies_column_and_table_changes(db_session: Session) -> None:
             relationships=(),
         ),
     )
-    schema = db_session.scalar(select(DataSourceSchema))
+    schema = db_session.scalar(
+        select(DataSourceSchema).where(
+            DataSourceSchema.data_source_id == data_source.id
+        )
+    )
     assert schema is not None
-    table = db_session.scalar(select(DataSourceTable))
+    table = db_session.scalar(
+        select(DataSourceTable).where(DataSourceTable.schema_id == schema.id)
+    )
     assert table is not None
     table.description = "keep me"
     label = db_session.scalar(
-        select(DataSourceColumn).where(DataSourceColumn.name == "label")
+        select(DataSourceColumn).where(
+            DataSourceColumn.table_id == table.id,
+            DataSourceColumn.name == "label",
+        )
     )
     assert label is not None
     label.description = "human label"
@@ -620,7 +736,10 @@ def test_sync_applies_column_and_table_changes(db_session: Session) -> None:
     db_session.refresh(table)
     db_session.refresh(label)
     identity = db_session.scalar(
-        select(DataSourceColumn).where(DataSourceColumn.name == "id")
+        select(DataSourceColumn).where(
+            DataSourceColumn.table_id == table.id,
+            DataSourceColumn.name == "id",
+        )
     )
     assert identity is not None
     assert table.table_type is DataSourceTableType.VIEW
@@ -737,7 +856,14 @@ def test_sync_status_pending_before_first_run(db_session: Session) -> None:
     )
     assert status.status is MetadataSyncStatus.PENDING
     assert status.schema_count is None
-    assert db_session.scalar(select(DataSourceMetadataSync)) is None
+    assert (
+        db_session.scalar(
+            select(DataSourceMetadataSync).where(
+                DataSourceMetadataSync.data_source_id == data_source.id
+            )
+        )
+        is None
+    )
 
 
 def test_deleting_data_source_cascades_sync_state(db_session: Session) -> None:

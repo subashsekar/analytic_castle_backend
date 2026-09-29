@@ -346,6 +346,7 @@ def test_metadata_api_rate_limit_defaults() -> None:
 
 def test_ai_limits_have_defaults() -> None:
     configured = Settings(
+        _env_file=None,
         APP_ENV="local",
         DATABASE_URL=settings.DATABASE_URL,
         JWT_SECRET_KEY="change-me-to-a-long-random-secret-key",
@@ -355,9 +356,10 @@ def test_ai_limits_have_defaults() -> None:
     assert configured.LLM_MODEL == "gpt-4o-mini"
     assert configured.LLM_TIMEOUT_SECONDS == 30.0
     assert configured.LLM_TEMPERATURE == 0.2
-    assert configured.LLM_MAX_OUTPUT_TOKENS == 1_024
+    assert configured.LLM_MAX_OUTPUT_TOKENS == 4_096
     assert configured.AI_MAX_MESSAGE_CHARS == 4_000
     assert configured.AI_MAX_CONTEXT_CHARS == 8_000
+    assert configured.AI_LLM_CONTEXT_CHARS == 8_000
     assert configured.AI_MAX_OUTPUT_CHARS == 8_000
     assert configured.AI_METADATA_SEARCH_LIMIT == 10
     assert configured.AI_METADATA_RESOLVE_SEARCH_LIMIT == 50
@@ -375,6 +377,30 @@ def test_ai_limits_have_defaults() -> None:
     assert configured.MCP_QUERY_TIMEOUT_SECONDS == 30.0
     assert configured.RATE_LIMIT_AI_CHAT == "10/minute"
     assert configured.rate_limit_spec("ai-chat") == "10/minute"
+
+
+def test_ai_sql_generation_limits_have_defaults() -> None:
+    configured = Settings(
+        APP_ENV="local",
+        DATABASE_URL=settings.DATABASE_URL,
+        JWT_SECRET_KEY="change-me-to-a-long-random-secret-key",
+        AI_SQL_MAX_SQL_CHARS=10_000,
+        AI_SQL_MAX_SCHEMA_CHARS=8_000,
+        AI_SQL_MAX_PLAN_SUMMARY_CHARS=2_000,
+        AI_SQL_MAX_EXPLANATION_CHARS=1_000,
+        AI_SQL_MAX_ASSUMPTIONS=20,
+        AI_SQL_VALIDATION_DEFAULT_SCHEMA="public",
+        AI_SQL_CORRECTION_MAX_ATTEMPTS=2,
+        AI_SQL_CORRECTION_MAX_FEEDBACK_CHARS=2_000,
+    )
+    assert configured.AI_SQL_MAX_SQL_CHARS == 10_000
+    assert configured.AI_SQL_MAX_SCHEMA_CHARS == 8_000
+    assert configured.AI_SQL_MAX_PLAN_SUMMARY_CHARS == 2_000
+    assert configured.AI_SQL_MAX_EXPLANATION_CHARS == 1_000
+    assert configured.AI_SQL_MAX_ASSUMPTIONS == 20
+    assert configured.AI_SQL_VALIDATION_DEFAULT_SCHEMA == "public"
+    assert configured.AI_SQL_CORRECTION_MAX_ATTEMPTS == 2
+    assert configured.AI_SQL_CORRECTION_MAX_FEEDBACK_CHARS == 2_000
 
 
 def test_ai_timeout_must_be_positive() -> None:

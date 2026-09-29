@@ -6,6 +6,7 @@ import sys
 import time
 import uuid
 from collections.abc import Coroutine, Generator
+from pathlib import Path
 from typing import TypeVar
 
 # Local PostgreSQL fallbacks for tests when DATABASE_URL is unset.
@@ -13,6 +14,9 @@ from typing import TypeVar
 # Do not inherit a developer .env DATABASE_URL (it may point at a remote host).
 _LOCAL_TEST_DATABASE_URL = (
     "postgresql+psycopg://analyticcastle:analyticcastle@127.0.0.1:5432/analyticcastle"
+)
+_LOCAL_TEST_FALLBACK_DATABASE_URL = (
+    "postgresql+psycopg://analyticcastle:analyticcastle@127.0.0.1:5432/postgres"
 )
 _DOCKER_TEST_DATABASE_URL = (
     "postgresql+psycopg://analyticcastle:analyticcastle@127.0.0.1:5433/analyticcastle"
@@ -34,8 +38,52 @@ def _database_is_ready(sqlalchemy_url: str) -> bool:
         ) as connection:
             connection.execute("SELECT 1")
         return True
-    except Exception:
+    except Exception:  # noqa: BLE001 — readiness probe must not raise
         return False
+
+
+def _ensure_database_exists(sqlalchemy_url: str) -> bool:
+    from urllib.parse import urlparse
+
+    import psycopg
+
+    if _database_is_ready(sqlalchemy_url):
+        return True
+
+    parsed = urlparse(_psycopg_dsn(sqlalchemy_url))
+    db_name = parsed.path.lstrip("/")
+    if not db_name:
+        return False
+    admin_path = "/postgres" if db_name else parsed.path
+    admin_dsn = parsed._replace(path=admin_path).geturl()
+    try:
+        with psycopg.connect(admin_dsn, connect_timeout=2) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT 1 FROM pg_database WHERE datname = %s",
+                    (db_name,),
+                )
+                if cursor.fetchone() is None:
+                    cursor.execute(f'CREATE DATABASE "{db_name}"')
+        return _database_is_ready(sqlalchemy_url)
+    except Exception:  # noqa: BLE001 — bootstrap helper must not raise
+        return False
+
+
+def _configured_remote_database_url() -> str | None:
+    """Read TEST_DATABASE_URL or DATABASE_URL from the project .env file."""
+    env_path = Path(__file__).resolve().parents[1] / ".env"
+    if not env_path.is_file():
+        return None
+    values: dict[str, str] = {}
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip('"').strip("'")
+    return values.get("TEST_DATABASE_URL") or values.get("DATABASE_URL")
 
 
 def _start_docker_test_postgres() -> bool:
@@ -93,7 +141,20 @@ def _configure_test_database_url() -> None:
     if _database_is_ready(_LOCAL_TEST_DATABASE_URL):
         os.environ["DATABASE_URL"] = _LOCAL_TEST_DATABASE_URL
         return
+    if _ensure_database_exists(_LOCAL_TEST_DATABASE_URL):
+        os.environ["DATABASE_URL"] = _LOCAL_TEST_DATABASE_URL
+        return
+    remote_url = _configured_remote_database_url()
+    if remote_url and _database_is_ready(remote_url):
+        os.environ["DATABASE_URL"] = remote_url
+        return
+    if _database_is_ready(_LOCAL_TEST_FALLBACK_DATABASE_URL):
+        os.environ["DATABASE_URL"] = _LOCAL_TEST_FALLBACK_DATABASE_URL
+        return
     if _database_is_ready(_DOCKER_TEST_DATABASE_URL) or _start_docker_test_postgres():
+        os.environ["DATABASE_URL"] = _DOCKER_TEST_DATABASE_URL
+        return
+    if _ensure_database_exists(_DOCKER_TEST_DATABASE_URL):
         os.environ["DATABASE_URL"] = _DOCKER_TEST_DATABASE_URL
         return
     current = os.environ.get("DATABASE_URL")
@@ -115,6 +176,11 @@ os.environ.setdefault(
 )
 os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
 os.environ.setdefault("EMAIL_PROVIDER", "console")
+os.environ.setdefault("OPENROUTER_API_KEY", "sk-test-fake-openrouter-key-not-real")
+if not os.environ.get("LLM_API_KEY", "").strip():
+    os.environ["LLM_API_KEY"] = "sk-test-fake-llm-key-not-real"
+if not os.environ.get("OPENROUTER_API_KEY", "").strip():
+    os.environ["OPENROUTER_API_KEY"] = "sk-test-fake-openrouter-key-not-real"
 os.environ.setdefault(
     "CORS_ALLOWED_ORIGINS",
     "http://localhost:3000,http://127.0.0.1:3000",
@@ -130,6 +196,9 @@ from app.connectors.registry import register_connector, unregister_connector
 from app.core.rate_limit import reset_rate_limiters
 from app.core.security import create_access_token, hash_password
 from app.db.models import (  # noqa: F401
+    AgentState,
+    AnalysisSession,
+    ConversationContext,
     DataSource,
     DataSourceColumn,
     DataSourceConnection,
@@ -200,9 +269,62 @@ def clear_metadata_sync_locks() -> Generator[None, None, None]:
     reset_metadata_sync_locks()
 
 
-@pytest.fixture
-def db_session() -> Generator[Session, None, None]:
+class RealNetworkBlockedError(RuntimeError):
+    """Raised when a test tries to reach a real HTTP endpoint (LLM, OpenRouter, ...)."""
+
+
+@pytest.fixture(autouse=True)
+def block_real_http(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail fast instead of calling real LLM/OpenRouter endpoints.
+
+    Only the network-backed httpx transports are blocked; ``httpx.MockTransport``
+    and Starlette's ``TestClient`` transport keep working.
+    """
+    import httpx
+
+    def _blocked(self: object, request: httpx.Request) -> httpx.Response:
+        del self
+        raise httpx.ConnectError(
+            f"real network access is disabled in tests: {request.url.host}",
+            request=request,
+        )
+
+    async def _blocked_async(self: object, request: httpx.Request) -> httpx.Response:
+        return _blocked(self, request)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", _blocked)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", _blocked_async)
+
+
+@pytest.fixture(autouse=True)
+def fast_ai_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bound retries, backoff, and agent budgets so a failure can never stall a test.
+
+    Tests that exercise retry/timeout behavior set their own values explicitly.
+    """
+    from app.core.config import settings
+
+    for name, value in {
+        "LLM_MAX_RETRIES": 0,
+        "LLM_TIMEOUT_SECONDS": 5.0,
+        "LLM_RETRY_BASE_BACKOFF_SECONDS": 0.01,
+        "LLM_RETRY_MAX_BACKOFF_SECONDS": 0.05,
+        "AI_CHAT_PHASE8_BUDGET_SECONDS": 20.0,
+        "AI_CHAT_PHASE8_AGENT_TIMEOUT_SECONDS": 10.0,
+        "AI_CHAT_PHASE8_RCA_TIMEOUT_SECONDS": 15.0,
+    }.items():
+        monkeypatch.setattr(settings, name, value)
+
+
+@pytest.fixture(scope="session")
+def database_schema() -> None:
+    """Create tables once per run; per-test isolation comes from the rolled-back transaction."""
     Base.metadata.create_all(bind=engine)
+
+
+@pytest.fixture
+def db_session(database_schema: None) -> Generator[Session, None, None]:
+    del database_schema
     connection = engine.connect()
     transaction = connection.begin()
     session = Session(bind=connection, join_transaction_mode="create_savepoint")

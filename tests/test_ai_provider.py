@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from app.ai.exceptions import (
     AIConfigurationError,
@@ -28,6 +29,11 @@ from app.core.logging import RedactingFilter, redact_secret
 from tests.conftest import run_async
 
 SECRET_KEY = "sk-test-secret-llm-key-do-not-log"
+
+
+@pytest.fixture(autouse=True)
+def _disable_llm_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "LLM_MAX_RETRIES", 0)
 
 
 def _config(**overrides: object) -> LLMProviderConfig:
@@ -87,8 +93,10 @@ def test_provider_config_from_settings_uses_openai_defaults() -> None:
     configured = llm_provider_config_from_settings()
     assert configured.provider == settings.LLM_PROVIDER
     assert configured.model == settings.LLM_MODEL
-    if not settings.LLM_BASE_URL:
+    if settings.LLM_PROVIDER == "openai" and not settings.LLM_BASE_URL.strip():
         assert configured.base_url == "https://api.openai.com/v1"
+    if settings.LLM_PROVIDER == "openrouter" and not settings.OPENROUTER_BASE_URL.strip():
+        assert configured.base_url == "https://openrouter.ai/api/v1"
 
 
 def test_provider_config_repr_omits_api_key() -> None:
@@ -106,6 +114,7 @@ def test_settings_repr_omits_llm_api_key() -> None:
 
 def test_create_provider_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "LLM_API_KEY", "")
+    monkeypatch.setattr(settings, "OPENROUTER_API_KEY", "")
     with pytest.raises(AIConfigurationError, match="API key"):
         create_llm_provider()
 
@@ -126,7 +135,7 @@ def test_create_provider_rejects_missing_base_url() -> None:
 
 
 def test_openai_compatible_requires_base_url_in_settings() -> None:
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         Settings(
             APP_ENV="local",
             DATABASE_URL=settings.DATABASE_URL,
@@ -159,7 +168,8 @@ def test_successful_generation() -> None:
 def test_successful_structured_generation() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content.decode("utf-8"))
-        assert payload["response_format"] == {"type": "json_object"}
+        assert payload["response_format"]["type"] == "json_schema"
+        assert "json_schema" in payload["response_format"]
         return httpx.Response(200, json=_success_body())
 
     provider = _provider(handler)
@@ -194,7 +204,8 @@ def test_structured_output_retries_without_response_format() -> None:
             AIAnalysisResult,
         )
         assert result.result.answer
-        assert calls["count"] == 2
+        # Client downgrades json_schema -> json_object, then provider retries without format.
+        assert calls["count"] == 3
 
     run_async(_run())
 

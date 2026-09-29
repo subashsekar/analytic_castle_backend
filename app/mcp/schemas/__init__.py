@@ -36,7 +36,7 @@ class MCPQueryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     data_source_id: UUID
-    sql: str = Field(min_length=1, max_length=100_000)
+    sql: str = Field(min_length=1, max_length=10_000)
     limit: int | None = Field(default=None, ge=1, le=10_000_000)
 
 

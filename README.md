@@ -135,6 +135,8 @@ CREATE DATABASE analyticcastle OWNER analyticcastle;
 | `AI_MAX_METADATA_TABLES` | Maximum table candidates returned in AI metadata context (`20`) |
 | `AI_MAX_METADATA_COLUMNS` | Maximum column candidates returned in AI metadata context (`50`) |
 | `AI_MAX_METADATA_RELATIONSHIPS` | Maximum relationship candidates returned in AI metadata context (`30`) |
+| `AI_SQL_CORRECTION_MAX_ATTEMPTS` | Maximum SQL correction retries after a validation or execution failure (`2`) |
+| `AI_SQL_CORRECTION_MAX_FEEDBACK_CHARS` | Maximum characters of failure feedback sent to the correction prompt (`2000`) |
 | `RATE_LIMIT_AI_CHAT` | AI chat request limit (`10/minute`) |
 
 ## Running the API
@@ -225,7 +227,7 @@ Internal metadata search reads the same persisted metadata tables. It is scoped 
 
 Safe sample-data retrieval is an internal service. It loads a discovered table from AnalyticCastle metadata, runs a read-only `SELECT` with an explicit column list and SQL `LIMIT` through the existing PostgreSQL connector, then masks PII and secrets before returning rows. Default sample size is 10 rows (maximum 100). Callers cannot request unmasked values.
 
-The AI analyst exposes `POST /api/v1/ai/chat`. It authenticates the user, authorizes the workspace data source, detects a structured analytical intent, resolves relevant Phase 4 catalog metadata for that intent, and returns a non-executable request plan plus compact metadata context. It does not generate SQL, execute queries, or call the customer database. Unit tests use a fake provider. Live LLM tests run only when `TEST_LLM_API_KEY` is set.
+The AI analyst exposes `POST /api/v1/ai/chat`. It authenticates the user, authorizes the workspace data source, detects a structured analytical intent, resolves relevant Phase 4 catalog metadata for that intent, and returns a non-executable request plan plus compact metadata context. An internal schema-aware SQL generation layer can draft structured SQL from authorized catalog metadata; chat does not expose that draft yet, and generated SQL is never executed by this layer. An internal SQL validation layer then treats generated SQL as untrusted input: it reuses Phase 5 read-only checks, parses the statement, and rejects unknown tables/columns against authorized metadata without executing SQL. An internal SQL execution layer runs only after that validation succeeds, invoking the existing PostgreSQL MCP `postgres.query` tool (with server-side timeout, row, and result-size limits); chat does not expose execution yet. An internal SQL correction layer may rewrite a failed draft after a validation or execution error, then re-runs the same validation before any retry; corrected SQL is untrusted and is never executed until it passes Chapter 7.2. Query history persistence records generated/validated/corrected SQL lifecycle status, duration, and safe result/error metadata for the owning user within a workspace; it does not store credentials, connection strings, tokens, or raw customer result rows. Unit tests use a fake provider. Live LLM tests run only when `TEST_LLM_API_KEY` is set.
 
 The in-process PostgreSQL MCP query tool (`postgres.query`) executes a single read-only SQL statement against an authorized data source through the existing connector. It does not accept connection strings or credentials as tool arguments. Query parameters are not supported; bind values are not interpolated into SQL. Live query tests run only when `TEST_POSTGRES_HOST` and related variables are set.
 
@@ -245,3 +247,7 @@ Other useful commands:
 alembic current
 alembic downgrade -1
 ```
+
+"run the project:"
+.\.venv\Scripts\activate
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000

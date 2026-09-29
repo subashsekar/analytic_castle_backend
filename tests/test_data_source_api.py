@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.connectors import (
@@ -428,7 +428,14 @@ def test_encryption_failure_does_not_create_data_source(
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Unable to store data source credentials"
-    assert db_session.scalar(select(DataSource)) is None
+    assert (
+        db_session.scalar(
+            select(func.count())
+            .select_from(DataSource)
+            .where(DataSource.workspace_id == uuid.UUID(workspace["id"]))
+        )
+        == 0
+    )
 
 
 def test_list_requires_authentication(client: TestClient) -> None:

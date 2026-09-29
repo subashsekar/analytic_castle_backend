@@ -10,7 +10,7 @@ import enum
 from datetime import date
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from app.core.config import settings
 
@@ -216,13 +216,23 @@ class AIFilter(BaseModel):
         token = _normalize_enum_token(value, upper=False)
         aliases = {
             "eq": FilterOperator.EQUALS.value,
+            "=": FilterOperator.EQUALS.value,
+            "==": FilterOperator.EQUALS.value,
             "ne": FilterOperator.NOT_EQUALS.value,
             "neq": FilterOperator.NOT_EQUALS.value,
+            "!=": FilterOperator.NOT_EQUALS.value,
+            "<>": FilterOperator.NOT_EQUALS.value,
             "gt": FilterOperator.GREATER_THAN.value,
+            ">": FilterOperator.GREATER_THAN.value,
             "lt": FilterOperator.LESS_THAN.value,
+            "<": FilterOperator.LESS_THAN.value,
             "gte": FilterOperator.GREATER_THAN_OR_EQUAL.value,
+            ">=": FilterOperator.GREATER_THAN_OR_EQUAL.value,
             "lte": FilterOperator.LESS_THAN_OR_EQUAL.value,
+            "<=": FilterOperator.LESS_THAN_OR_EQUAL.value,
             "not_equal": FilterOperator.NOT_EQUALS.value,
+            "like": FilterOperator.CONTAINS.value,
+            "ilike": FilterOperator.CONTAINS.value,
         }
         if token in aliases:
             return aliases[token]
@@ -232,7 +242,7 @@ class AIFilter(BaseModel):
     @classmethod
     def reject_non_scalars(cls, value: Any) -> Any:
         if isinstance(value, (dict, list)):
-            raise ValueError("Filter scalars cannot be objects or lists")
+            raise TypeError("Filter scalars cannot be objects or lists")
         if isinstance(value, str) and _looks_like_sql(value):
             raise ValueError("Filter values must not contain SQL")
         return value
@@ -243,12 +253,12 @@ class AIFilter(BaseModel):
         if value is None:
             return value
         if not isinstance(value, list):
-            raise ValueError("Filter values must be a list")
+            raise TypeError("Filter values must be a list")
         if len(value) > _MAX_LLM_COLLECTION:
             raise ValueError("Too many filter values")
         for item in value:
             if isinstance(item, (dict, list)):
-                raise ValueError("Filter values must be scalars")
+                raise TypeError("Filter values must be scalars")
             if isinstance(item, str) and _looks_like_sql(item):
                 raise ValueError("Filter values must not contain SQL")
         return value
@@ -322,7 +332,165 @@ class AISort(BaseModel):
     @field_validator("direction", mode="before")
     @classmethod
     def normalize_direction(cls, value: Any) -> Any:
-        return _normalize_enum_token(value, upper=False)
+        if not isinstance(value, str):
+            return value
+        token = _normalize_enum_token(value, upper=False)
+        aliases = {
+            "ascending": SortDirection.ASC.value,
+            "descending": SortDirection.DESC.value,
+            "ascend": SortDirection.ASC.value,
+            "descend": SortDirection.DESC.value,
+        }
+        if token in aliases:
+            return aliases[token]
+        return token
+
+
+def coerce_llm_intent_payload(data: Any) -> Any:
+    """Normalize common LLM shape mistakes before strict intent validation."""
+    if not isinstance(data, dict):
+        return data
+    payload = dict(data)
+
+    intent = payload.get("intent")
+    if isinstance(intent, str):
+        token = _normalize_enum_token(intent, upper=True)
+        known = {item.value for item in AIIntentType}
+        aliases = {
+            "REPORT": AIIntentType.SUMMARY.value,
+            "ANALYZE": AIIntentType.ANALYTICAL_QUERY.value,
+            "ANALYSIS": AIIntentType.ANALYTICAL_QUERY.value,
+            "QUERY": AIIntentType.ANALYTICAL_QUERY.value,
+            "LOOKUP": AIIntentType.DATA_LOOKUP.value,
+            "SCHEMA": AIIntentType.SCHEMA_QUESTION.value,
+            "META": AIIntentType.SCHEMA_QUESTION.value,
+            "METADATA": AIIntentType.SCHEMA_QUESTION.value,
+        }
+        if token in aliases:
+            payload["intent"] = aliases[token]
+        elif token not in known:
+            payload["intent"] = AIIntentType.UNKNOWN.value
+            payload["requires_clarification"] = True
+            if not payload.get("clarification_question"):
+                payload["clarification_question"] = (
+                    "What would you like to know — a total, a count, "
+                    "a ranking, or a breakdown?"
+                )
+
+    operation = payload.get("operation")
+    if isinstance(operation, str):
+        op_token = _normalize_enum_token(operation, upper=True)
+        known_ops = {item.value for item in AIOperationType}
+        if op_token not in known_ops:
+            payload["operation"] = None
+    elif operation == "":
+        payload["operation"] = None
+
+    clarification = payload.get("clarification_question")
+    if isinstance(clarification, str) and _looks_like_sql(clarification):
+        payload["clarification_question"] = (
+            "What would you like to know — a total, a count, "
+            "a ranking, or a breakdown?"
+        )
+        payload["requires_clarification"] = True
+
+    metrics = payload.get("metrics")
+    if isinstance(metrics, list):
+        coerced_metrics: list[Any] = []
+        for item in metrics[:_MAX_LLM_COLLECTION]:
+            if isinstance(item, str):
+                cleaned = item.strip()
+                if cleaned:
+                    coerced_metrics.append(
+                        {"name": cleaned, "aggregation": AggregationType.NONE.value}
+                    )
+            elif isinstance(item, (dict, AIMetric)):
+                coerced_metrics.append(item)
+        payload["metrics"] = coerced_metrics
+    elif metrics is None:
+        payload["metrics"] = []
+
+    dimensions = payload.get("dimensions")
+    if isinstance(dimensions, list):
+        coerced_dimensions: list[Any] = []
+        for item in dimensions[:_MAX_LLM_COLLECTION]:
+            if isinstance(item, str):
+                cleaned = item.strip()
+                if cleaned:
+                    coerced_dimensions.append({"name": cleaned})
+            elif isinstance(item, (dict, AIDimension)):
+                coerced_dimensions.append(item)
+        payload["dimensions"] = coerced_dimensions
+    elif dimensions is None:
+        payload["dimensions"] = []
+
+    filters = payload.get("filters")
+    if isinstance(filters, list):
+        coerced_filters: list[Any] = []
+        dropped = False
+        for item in filters[:_MAX_LLM_COLLECTION]:
+            if isinstance(item, AIFilter):
+                coerced_filters.append(item)
+                continue
+            if not isinstance(item, dict):
+                dropped = True
+                continue
+            try:
+                AIFilter.model_validate(item)
+            except (ValidationError, TypeError, ValueError):
+                dropped = True
+                continue
+            coerced_filters.append(item)
+        payload["filters"] = coerced_filters
+        if dropped:
+            payload["requires_clarification"] = True
+            if not payload.get("clarification_question"):
+                payload["clarification_question"] = (
+                    "What filters or metrics should this report include?"
+                )
+    elif filters is None:
+        payload["filters"] = []
+
+    time_range = payload.get("time_range")
+    if isinstance(time_range, (dict, AITimeRange)):
+        try:
+            if isinstance(time_range, AITimeRange):
+                AITimeRange.model_validate(time_range.model_dump())
+            else:
+                AITimeRange.model_validate(time_range)
+        except (ValidationError, TypeError, ValueError):
+            payload["time_range"] = None
+            payload["requires_clarification"] = True
+    elif time_range in ("", None):
+        payload["time_range"] = None
+
+    sort = payload.get("sort")
+    if isinstance(sort, (dict, AISort)):
+        try:
+            if isinstance(sort, AISort):
+                AISort.model_validate(sort.model_dump())
+            else:
+                AISort.model_validate(sort)
+        except (ValidationError, TypeError, ValueError):
+            payload["sort"] = None
+    elif sort in ("", None):
+        payload["sort"] = None
+
+    for flag in (
+        "requires_data_access",
+        "requires_metadata",
+        "requires_relationships",
+        "requires_clarification",
+    ):
+        value = payload.get(flag)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"true", "yes", "1"}:
+                payload[flag] = True
+            elif lowered in {"false", "no", "0"}:
+                payload[flag] = False
+
+    return payload
 
 
 class LLMIntentDetection(BaseModel):
@@ -356,6 +524,11 @@ class LLMIntentDetection(BaseModel):
     unsupported_reason: str | None = Field(
         default=None, max_length=_MAX_UNSUPPORTED_REASON_CHARS
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_payload(cls, data: Any) -> Any:
+        return coerce_llm_intent_payload(data)
 
     @field_validator("intent", mode="before")
     @classmethod

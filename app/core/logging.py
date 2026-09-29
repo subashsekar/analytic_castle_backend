@@ -11,7 +11,7 @@ _SENSITIVE_ASSIGNMENT = re.compile(
     r"current_password|new_password|credential|"
     r"refresh_token|access_token|reset_token|verification_token|token|"
     r"authorization|secret|jwt_secret_key|data_source_encryption_key|"
-    r"llm_api_key|openai_api_key|api_key|"
+    r"llm_api_key|openrouter_api_key|openai_api_key|api_key|"
     r"database_url|connection_string|connection_uri)\b\s*[:=]\s*([^\s,;&]+)"
 )
 _BEARER = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-+=/]+")

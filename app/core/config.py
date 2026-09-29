@@ -175,10 +175,19 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "gpt-4o-mini"
     LLM_TIMEOUT_SECONDS: float = Field(default=30.0, gt=0, le=120)
     LLM_TEMPERATURE: float = Field(default=0.2, ge=0, le=2)
-    LLM_MAX_OUTPUT_TOKENS: int = Field(default=1_024, ge=1, le=8_192)
+    LLM_MAX_OUTPUT_TOKENS: int = Field(default=4_096, ge=1, le=8_192)
+    LLM_MAX_RETRIES: int = Field(default=3, ge=0, le=10)
+    LLM_RETRY_BASE_BACKOFF_SECONDS: float = Field(default=0.5, gt=0, le=60)
+    LLM_RETRY_MAX_BACKOFF_SECONDS: float = Field(default=30.0, gt=0, le=300)
+    OPENROUTER_API_KEY: str = Field(default="", repr=False)
+    OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
     AI_MAX_MESSAGE_CHARS: int = Field(default=4_000, ge=1, le=32_000)
     AI_MAX_CONTEXT_CHARS: int = Field(default=8_000, ge=1, le=64_000)
+    AI_MAX_CONTEXT_MESSAGES: int = Field(default=100, ge=1, le=1_000)
     AI_MAX_OUTPUT_CHARS: int = Field(default=8_000, ge=1, le=64_000)
+    AI_CONVERSATION_DEFAULT_PAGE_SIZE: int = Field(default=50, ge=1, le=100)
+    AI_CONVERSATION_MAX_PAGE_SIZE: int = Field(default=100, ge=1, le=100)
+    AI_LLM_CONTEXT_CHARS: int = Field(default=8_000, ge=1, le=64_000)
     AI_METADATA_SEARCH_LIMIT: int = Field(default=10, ge=1, le=50)
     AI_METADATA_RESOLVE_SEARCH_LIMIT: int = Field(default=50, ge=1, le=100)
     AI_MAX_METADATA_TABLES: int = Field(default=20, ge=1, le=100)
@@ -190,6 +199,27 @@ class Settings(BaseSettings):
     AI_MAX_PLAN_FILTERS: int = Field(default=20, ge=1, le=50)
     AI_MAX_FILTER_VALUES: int = Field(default=25, ge=1, le=100)
     AI_MAX_CONCEPT_CHARS: int = Field(default=128, ge=16, le=512)
+    AI_SQL_MAX_SQL_CHARS: int = Field(default=10_000, ge=1, le=100_000)
+    AI_SQL_MAX_SCHEMA_CHARS: int = Field(default=8_000, ge=256, le=64_000)
+    AI_SQL_MAX_PLAN_SUMMARY_CHARS: int = Field(default=2_000, ge=64, le=8_000)
+    AI_SQL_MAX_EXPLANATION_CHARS: int = Field(default=1_000, ge=32, le=4_000)
+    AI_SQL_MAX_ASSUMPTIONS: int = Field(default=20, ge=1, le=50)
+    AI_SQL_VALIDATION_DEFAULT_SCHEMA: str = Field(default="public", min_length=1, max_length=63)
+    AI_SQL_CORRECTION_MAX_ATTEMPTS: int = Field(default=2, ge=1, le=5)
+    AI_SQL_CORRECTION_MAX_FEEDBACK_CHARS: int = Field(default=2_000, ge=64, le=8_000)
+    # Chat Phase 8. Independent agents run concurrently, so the budget is the
+    # wall-clock cap for all agents together; the chat request also spends time
+    # on intent + SQL before this. Keep the frontend timeout above
+    # intent/SQL time + budget (≈ 150–180s with defaults).
+    AI_CHAT_PHASE8_BUDGET_SECONDS: float = Field(default=75.0, gt=5, le=300)
+    AI_CHAT_PHASE8_AGENT_TIMEOUT_SECONDS: float = Field(default=30.0, gt=1, le=120)
+    # Root cause makes several LLM calls (hypotheses, evidence SQL, re-rank).
+    AI_CHAT_PHASE8_RCA_TIMEOUT_SECONDS: float = Field(default=55.0, gt=1, le=240)
+    AI_CHAT_PHASE8_RCA_MAX_INVESTIGATION_QUERIES: int = Field(default=1, ge=0, le=5)
+    AI_CHAT_PHASE8_MAX_TOKENS: int = Field(default=1_200, ge=256, le=4_096)
+    AI_CHAT_PHASE8_PROMPT_ROWS: int = Field(default=20, ge=1, le=100)
+    # Deterministic catalog-only query used when LLM SQL cannot be validated.
+    AI_CHAT_DETERMINISTIC_SQL_FALLBACK: bool = True
 
     @field_validator("JWT_ALGORITHM")
     @classmethod
@@ -216,7 +246,14 @@ class Settings(BaseSettings):
             )
         return provider
 
-    @field_validator("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL", mode="before")
+    @field_validator(
+        "LLM_API_KEY",
+        "LLM_BASE_URL",
+        "LLM_MODEL",
+        "OPENROUTER_API_KEY",
+        "OPENROUTER_BASE_URL",
+        mode="before",
+    )
     @classmethod
     def strip_llm_text(cls, value: object) -> object:
         if isinstance(value, str):
@@ -307,6 +344,11 @@ class Settings(BaseSettings):
         if self.LLM_PROVIDER == "openai_compatible" and not self.LLM_BASE_URL:
             raise ValueError(
                 "LLM_BASE_URL is required when LLM_PROVIDER=openai_compatible"
+            )
+        if self.LLM_RETRY_BASE_BACKOFF_SECONDS > self.LLM_RETRY_MAX_BACKOFF_SECONDS:
+            raise ValueError(
+                "LLM_RETRY_BASE_BACKOFF_SECONDS cannot exceed "
+                "LLM_RETRY_MAX_BACKOFF_SECONDS"
             )
         if not self.is_production:
             return self

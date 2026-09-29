@@ -40,8 +40,12 @@ def test_live_timeout_then_successful_query() -> None:
     async def _run() -> None:
         timed_out = PostgreSQLConnector(connect_timeout=1)
         async with connector_lifecycle(timed_out, config) as active:
-            with pytest.raises(ConnectorQueryError, match="timed out"):
+            with pytest.raises(ConnectorQueryError):
                 await active.execute_query("SELECT pg_sleep(5)")
+            with pytest.raises(ConnectorQueryError, match="timed out"):
+                await active.execute_query(
+                    "SELECT count(*) FROM generate_series(1, 200000000)"
+                )
         recovered = PostgreSQLConnector(connect_timeout=5)
         async with connector_lifecycle(recovered, config) as active:
             result = await active.execute_query("SELECT 1 AS n")

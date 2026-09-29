@@ -198,7 +198,11 @@ def test_discovery_does_not_persist_metadata(db_session: Session) -> None:
 
     run_async(service.discover(data_source.id, workspace_id=data_source.workspace_id))
 
-    remaining = db_session.scalars(select(DataSourceSchema)).all()
+    remaining = db_session.scalars(
+        select(DataSourceSchema).where(
+            DataSourceSchema.data_source_id == data_source.id
+        )
+    ).all()
     assert remaining == []
 
 

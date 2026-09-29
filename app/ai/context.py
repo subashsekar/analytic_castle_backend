@@ -45,22 +45,40 @@ class MetadataSearchContextProvider:
         query: str,
         limit: int | None = None,
     ) -> tuple[MetadataSnippet, ...]:
+        from app.ai.metadata_resolver import expand_metadata_search_terms
+
         resolved_limit = (
             limit if limit is not None else settings.AI_METADATA_SEARCH_LIMIT
         )
         search_query = query.strip()[: settings.METADATA_SEARCH_MAX_QUERY_LENGTH]
         if not search_query:
             return ()
+        terms = list(expand_metadata_search_terms(search_query))
+        if search_query not in terms:
+            terms.insert(0, search_query)
+        snippets: list[MetadataSnippet] = []
+        seen: set[tuple[str | None, str | None, str | None]] = set()
         try:
-            page = self._search.search_metadata(
-                data_source_id,
-                search_query,
-                workspace_id=workspace_id,
-                limit=resolved_limit,
-            )
+            for term in terms:
+                if len(snippets) >= resolved_limit:
+                    break
+                page = self._search.search_metadata(
+                    data_source_id,
+                    term,
+                    workspace_id=workspace_id,
+                    limit=resolved_limit,
+                )
+                for item in page.results:
+                    key = (item.schema_name, item.table_name, item.column_name)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    snippets.append(_snippet_from_result(item))
+                    if len(snippets) >= resolved_limit:
+                        break
         except (MetadataSearchError, ValueError):
-            return ()
-        return tuple(_snippet_from_result(item) for item in page.results)
+            return tuple(snippets)
+        return tuple(snippets)
 
 
 def build_ai_context(access: DataSourceAccess) -> AIContext:

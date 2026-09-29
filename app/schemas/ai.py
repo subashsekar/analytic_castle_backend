@@ -31,6 +31,8 @@ class AIChatRequest(BaseModel):
 
     message: str = Field(min_length=1, max_length=32_000)
     data_source_id: UUID
+    conversation_id: UUID | None = None
+    conversation_version: int | None = Field(default=None, ge=1)
 
     @field_validator("message", mode="before")
     @classmethod
@@ -130,6 +132,35 @@ class AIPlanResponse(BaseModel):
     unsupported: bool = False
 
 
+class AIQueryPreviewResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    columns: list[str] = Field(default_factory=list)
+    row_count: int = 0
+    truncated: bool = False
+    sample_rows: list[list[Any]] = Field(default_factory=list)
+
+
+class AIPhase8AnalysisResponse(BaseModel):
+    """Optional Phase 8 analysis panels for the AI Analyst frontend."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: UUID | None = None
+    data_analyst: dict[str, Any] | None = None
+    trend: dict[str, Any] | None = None
+    anomaly: dict[str, Any] | None = None
+    root_cause: dict[str, Any] | None = None
+    insight: dict[str, Any] | None = None
+    recommendation: dict[str, Any] | None = None
+    evaluation: dict[str, Any] | None = None
+    sql: str | None = None
+    query_preview: AIQueryPreviewResponse | None = None
+    question_types: list[str] | None = None
+    facts: list[str] | None = None
+    notes: list[str] | None = None
+
+
 class AIChatResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -140,6 +171,9 @@ class AIChatResponse(BaseModel):
     intent: AIIntentResponse
     plan: AIPlanResponse
     metadata_context: ResolvedMetadataContext
+    conversation_id: UUID | None = None
+    conversation_version: int | None = Field(default=None, ge=1)
+    analysis: AIPhase8AnalysisResponse | None = None
 
 
 def intent_response(intent: AIIntent) -> AIIntentResponse:
@@ -208,4 +242,36 @@ def plan_response(plan: AIRequestPlan) -> AIPlanResponse:
         requires_time_filter=plan.requires_time_filter,
         requires_relationships=plan.requires_relationships,
         unsupported=plan.unsupported,
+    )
+
+
+def phase8_analysis_response(payload: object | None) -> AIPhase8AnalysisResponse | None:
+    if payload is None:
+        return None
+    from app.ai.analysis_pipeline import AnalysisPayload
+
+    if not isinstance(payload, AnalysisPayload):
+        return None
+    preview = None
+    if payload.query_preview is not None:
+        preview = AIQueryPreviewResponse(
+            columns=list(payload.query_preview.columns),
+            row_count=payload.query_preview.row_count,
+            truncated=payload.query_preview.truncated,
+            sample_rows=list(payload.query_preview.sample_rows),
+        )
+    return AIPhase8AnalysisResponse(
+        session_id=payload.session_id,
+        data_analyst=payload.data_analyst,
+        trend=payload.trend,
+        anomaly=payload.anomaly,
+        root_cause=payload.root_cause,
+        insight=payload.insight,
+        recommendation=payload.recommendation,
+        evaluation=payload.evaluation,
+        sql=payload.sql,
+        query_preview=preview,
+        question_types=payload.question_types,
+        facts=payload.facts,
+        notes=payload.notes,
     )

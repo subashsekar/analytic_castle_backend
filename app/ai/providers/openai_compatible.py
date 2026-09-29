@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Sequence
-from typing import Any, TypeVar, cast
+from typing import TypeVar
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -15,6 +15,17 @@ from app.ai.exceptions import (
     AIProviderTimeoutError,
     AIResponseValidationError,
 )
+from app.ai.llm import (
+    AsyncLLMClient,
+    LLMClientConfig,
+    LLMError,
+    LLMInvalidRequestError,
+    LLMRequest,
+    StructuredOutputConfig,
+)
+from app.ai.llm import (
+    LLMMessage as InfraLLMMessage,
+)
 from app.ai.providers.base import LLMGeneration, LLMMessage, StructuredGeneration
 from app.ai.providers.config import LLMProviderConfig, validate_llm_provider_config
 from app.ai.types import TokenUsage
@@ -24,8 +35,60 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 
-_CHAT_COMPLETIONS_PATH = "/chat/completions"
 _MAX_CONTENT_CHARS = 32_000
+
+
+def _client_config_from_provider(config: LLMProviderConfig) -> LLMClientConfig:
+    return LLMClientConfig(
+        api_key=config.api_key,
+        base_url=config.base_url,
+        model=config.model,
+        timeout=config.timeout_seconds,
+        temperature=config.temperature,
+        max_tokens=config.max_output_tokens,
+        max_retries=settings.LLM_MAX_RETRIES,
+        retry_base_backoff=settings.LLM_RETRY_BASE_BACKOFF_SECONDS,
+        retry_max_backoff=settings.LLM_RETRY_MAX_BACKOFF_SECONDS,
+    )
+
+
+def _map_llm_error(exc: LLMError) -> Exception:
+    from app.ai.llm import (
+        LLMAuthenticationError,
+        LLMInvalidRequestError,
+        LLMProviderError,
+        LLMRateLimitError,
+        LLMResponseValidationError,
+        LLMTimeoutError,
+    )
+
+    if isinstance(exc, LLMTimeoutError):
+        return AIProviderTimeoutError()
+    if isinstance(exc, LLMRateLimitError):
+        return AIProviderRateLimitError()
+    if isinstance(exc, LLMAuthenticationError):
+        return AIProviderAuthenticationError()
+    if isinstance(exc, LLMResponseValidationError):
+        return AIResponseValidationError(raw_content=exc.raw_content)
+    if isinstance(exc, LLMInvalidRequestError):
+        return AIProviderError()
+    if isinstance(exc, LLMProviderError):
+        if "unavailable" in str(exc).lower():
+            return AIProviderError("AI model is unavailable")
+        return AIProviderError()
+    return AIProviderError()
+
+
+def _usage_from_infra(usage: object) -> TokenUsage:
+    from app.ai.llm import LLMUsage
+
+    if not isinstance(usage, LLMUsage):
+        return TokenUsage()
+    return TokenUsage(
+        input_tokens=usage.prompt_tokens,
+        output_tokens=usage.completion_tokens,
+        total_tokens=usage.total_tokens,
+    )
 
 
 class OpenAICompatibleProvider:
@@ -39,7 +102,10 @@ class OpenAICompatibleProvider:
     ) -> None:
         validate_llm_provider_config(config)
         self._config = config
-        self._transport = transport
+        self._client = AsyncLLMClient(
+            _client_config_from_provider(config),
+            transport=transport,
+        )
 
     @property
     def name(self) -> str:
@@ -59,13 +125,22 @@ class OpenAICompatibleProvider:
         temperature: float | None = None,
         max_output_tokens: int | None = None,
     ) -> LLMGeneration:
-        payload = self._completion_payload(
+        request = self._build_request(
             messages,
             temperature=temperature,
             max_output_tokens=max_output_tokens,
         )
-        body = await self._post_completions(payload)
-        return self._parse_generation(body)
+        try:
+            response = await self._client.complete(request)
+        except LLMError as exc:
+            raise _map_llm_error(exc) from exc
+        content = self._truncate_content(response.content)
+        return LLMGeneration(
+            content=content,
+            model=response.model,
+            usage=_usage_from_infra(response.usage),
+            finish_reason=response.finish_reason,
+        )
 
     async def generate_structured(
         self,
@@ -75,192 +150,89 @@ class OpenAICompatibleProvider:
         temperature: float | None = None,
         max_output_tokens: int | None = None,
     ) -> StructuredGeneration[T]:
-        payload = self._completion_payload(
+        from app.ai.prompt.structured import structured_output_from_model
+
+        request = self._build_request(
             messages,
             temperature=temperature,
             max_output_tokens=max_output_tokens,
-            json_object=True,
+            structured_output=structured_output_from_model(schema),
         )
         try:
-            body = await self._post_completions(payload)
-        except AIProviderError as exc:
-            if type(exc) is not AIProviderError or "response_format" not in payload:
-                raise
-            payload.pop("response_format", None)
-            body = await self._post_completions(payload)
-        generation = self._parse_generation(body)
-        parsed = _parse_structured(generation.content, schema)
+            response = await self._client.complete(request)
+        except LLMError as exc:
+            if (
+                not isinstance(exc, LLMInvalidRequestError)
+                or not request.structured_output
+            ):
+                raise _map_llm_error(exc) from exc
+            # Client already downgrades json_schema -> json_object -> none.
+            # Keep a final unconstrained retry for provider wrappers that still 400.
+            request = request.model_copy(update={"structured_output": None})
+            try:
+                response = await self._client.complete(request)
+            except LLMError as retry_exc:
+                raise _map_llm_error(retry_exc) from retry_exc
+        content = self._truncate_content(response.content)
+        parsed = _parse_structured(content, schema)
         return StructuredGeneration(
             result=parsed,
-            model=generation.model,
-            usage=generation.usage,
-            finish_reason=generation.finish_reason,
+            model=response.model,
+            usage=_usage_from_infra(response.usage),
+            finish_reason=response.finish_reason,
         )
 
-    def _completion_payload(
+    def _build_request(
         self,
         messages: Sequence[LLMMessage],
         *,
         temperature: float | None,
         max_output_tokens: int | None,
+        structured_output: StructuredOutputConfig | None = None,
         json_object: bool = False,
-    ) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "model": self._config.model,
-            "messages": [
-                {"role": message.role, "content": message.content}
+    ) -> LLMRequest:
+        output = structured_output
+        if output is None and json_object:
+            output = StructuredOutputConfig()
+        return LLMRequest(
+            model=self._config.model,
+            messages=[
+                InfraLLMMessage(role=message.role, content=message.content)  # type: ignore[arg-type]
                 for message in messages
             ],
-            "temperature": (
-                self._config.temperature if temperature is None else temperature
-            ),
-            "max_tokens": (
-                self._config.max_output_tokens
-                if max_output_tokens is None
-                else max_output_tokens
-            ),
-        }
-        if json_object:
-            payload["response_format"] = {"type": "json_object"}
-        return payload
+            temperature=temperature,
+            max_tokens=max_output_tokens,
+            structured_output=output,
+        )
 
-    async def _post_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
-        headers = {
-            "Authorization": f"Bearer {self._config.api_key}",
-            "Content-Type": "application/json",
-        }
-        started_model = self._config.model
-        try:
-            async with httpx.AsyncClient(
-                base_url=self._config.base_url,
-                timeout=self._config.timeout_seconds,
-                # httpx exposes both sync and async transport base classes; cast
-                # here because this provider only uses `AsyncClient`.
-                transport=cast(httpx.AsyncBaseTransport | None, self._transport),
-            ) as client:
-                response = await client.post(
-                    _CHAT_COMPLETIONS_PATH,
-                    headers=headers,
-                    json=payload,
-                )
-        except httpx.TimeoutException as exc:
-            logger.warning(
-                "LLM provider timeout provider=%s model=%s",
-                self._config.provider,
-                started_model,
-            )
-            raise AIProviderTimeoutError() from exc
-        except httpx.RequestError as exc:
-            logger.warning(
-                "LLM provider request failed provider=%s model=%s error_type=%s",
-                self._config.provider,
-                started_model,
-                type(exc).__name__,
-            )
-            raise AIProviderError() from exc
-
-        return _decode_provider_response(response, provider=self._config.provider)
-
-    def _parse_generation(self, body: dict[str, Any]) -> LLMGeneration:
-        choices = body.get("choices")
-        if not isinstance(choices, list) or not choices:
-            raise AIResponseValidationError()
-        first = choices[0]
-        if not isinstance(first, dict):
-            raise AIResponseValidationError()
-        message = first.get("message")
-        if not isinstance(message, dict):
-            raise AIResponseValidationError()
-        content = message.get("content")
-        if not isinstance(content, str) or not content.strip():
-            raise AIResponseValidationError()
+    def _truncate_content(self, content: str) -> str:
         max_output = min(settings.AI_MAX_OUTPUT_CHARS, _MAX_CONTENT_CHARS)
         if len(content) > max_output:
-            content = content[:max_output]
-        model = body.get("model")
-        if not isinstance(model, str) or not model.strip():
-            model = self._config.model
-        finish_reason = first.get("finish_reason")
-        if finish_reason is not None and not isinstance(finish_reason, str):
-            finish_reason = None
-        return LLMGeneration(
-            content=content,
-            model=model,
-            usage=_parse_usage(body.get("usage")),
-            finish_reason=finish_reason,
-        )
-
-
-def _decode_provider_response(
-    response: httpx.Response,
-    *,
-    provider: str,
-) -> dict[str, Any]:
-    status = response.status_code
-    if status in {401, 403}:
-        logger.warning(
-            "LLM provider authentication failed provider=%s status=%s",
-            provider,
-            status,
-        )
-        raise AIProviderAuthenticationError()
-    if status == 429:
-        logger.warning(
-            "LLM provider rate limited provider=%s status=%s", provider, status
-        )
-        raise AIProviderRateLimitError()
-    if status in {408, 504}:
-        logger.warning("LLM provider timeout provider=%s status=%s", provider, status)
-        raise AIProviderTimeoutError()
-    if status == 404:
-        logger.warning("LLM model unavailable provider=%s status=%s", provider, status)
-        raise AIProviderError("AI model is unavailable")
-    if status >= 500:
-        logger.warning("LLM provider failure provider=%s status=%s", provider, status)
-        raise AIProviderError()
-    if status >= 400:
-        logger.warning(
-            "LLM provider rejected request provider=%s status=%s", provider, status
-        )
-        raise AIProviderError()
-    try:
-        body = response.json()
-    except json.JSONDecodeError as exc:
-        logger.warning(
-            "LLM provider returned malformed JSON provider=%s status=%s",
-            provider,
-            status,
-        )
-        raise AIResponseValidationError() from exc
-    if not isinstance(body, dict):
-        raise AIResponseValidationError()
-    return body
-
-
-def _parse_usage(raw: object) -> TokenUsage:
-    if not isinstance(raw, dict):
-        return TokenUsage()
-    return TokenUsage(
-        input_tokens=_optional_non_negative_int(raw.get("prompt_tokens")),
-        output_tokens=_optional_non_negative_int(raw.get("completion_tokens")),
-        total_tokens=_optional_non_negative_int(raw.get("total_tokens")),
-    )
-
-
-def _optional_non_negative_int(value: object) -> int | None:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        return None
-    return value
+            return content[:max_output]
+        return content
 
 
 def _parse_structured(content: str, schema: type[T]) -> T:
+    from app.ai.llm.content import extract_json_object
+
     try:
-        payload = json.loads(content)
-    except json.JSONDecodeError as exc:
+        payload = extract_json_object(content)
+    except (json.JSONDecodeError, ValueError) as exc:
+        logger.warning(
+            "Structured LLM JSON extract failed schema=%s error=%s content_chars=%s",
+            schema.__name__,
+            type(exc).__name__,
+            len(content),
+        )
         raise AIResponseValidationError(raw_content=content) from exc
-    if not isinstance(payload, dict):
-        raise AIResponseValidationError(raw_content=content)
     try:
         return schema.model_validate(payload)
     except ValidationError as exc:
+        logger.warning(
+            "Structured LLM schema validation failed schema=%s errors=%s "
+            "content_chars=%s",
+            schema.__name__,
+            exc.errors()[:8],
+            len(content),
+        )
         raise AIResponseValidationError(raw_content=content) from exc

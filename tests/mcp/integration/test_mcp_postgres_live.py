@@ -223,12 +223,23 @@ def test_mcp_query_timeout_against_test_database(
     context = MCPToolContext(workspace_id=workspace.id, user_id=test_user.id)
 
     async def _run() -> None:
-        with pytest.raises(MCPQueryTimeoutError):
+        from app.mcp.exceptions import MCPQueryRejectedError
+
+        with pytest.raises(MCPQueryRejectedError):
             await client.call_tool(
                 POSTGRES_QUERY_TOOL_NAME,
                 {
                     "data_source_id": str(source.id),
                     "sql": "SELECT pg_sleep(5)",
+                },
+                context,
+            )
+        with pytest.raises(MCPQueryTimeoutError):
+            await client.call_tool(
+                POSTGRES_QUERY_TOOL_NAME,
+                {
+                    "data_source_id": str(source.id),
+                    "sql": "SELECT count(*) FROM generate_series(1, 200000000)",
                 },
                 context,
             )

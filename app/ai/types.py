@@ -81,6 +81,7 @@ class AIRequest:
     data_source_id: UUID
     request_id: str | None = None
     conversation_id: UUID | None = None
+    conversation_version: int | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +94,10 @@ class AIResponse:
     intent: AIIntent | None = None
     plan: AIRequestPlan | None = None
     metadata_context: ResolvedMetadataContext | None = None
+    conversation_id: UUID | None = None
+    conversation_version: int | None = None
+    # Phase 8 structured panel payload (namespaced under API field `analysis`)
+    phase8_analysis: object | None = None
 
 
 class AIAnalysisResult(BaseModel):

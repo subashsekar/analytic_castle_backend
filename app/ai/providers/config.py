@@ -3,12 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from app.ai.exceptions import AIConfigurationError
-from app.core.config import settings
-
-_PROVIDER_BASE_URLS: dict[str, str] = {
-    "openai": "https://api.openai.com/v1",
-    "openrouter": "https://openrouter.ai/api/v1",
-}
+from app.ai.llm.resolve import resolve_llm_settings
 
 
 @dataclass(frozen=True)
@@ -34,18 +29,15 @@ class LLMProviderConfig:
 
 
 def llm_provider_config_from_settings() -> LLMProviderConfig:
-    provider = settings.LLM_PROVIDER.strip().lower()
-    base_url = settings.LLM_BASE_URL.strip().rstrip("/")
-    if not base_url:
-        base_url = _PROVIDER_BASE_URLS.get(provider, "")
+    resolved = resolve_llm_settings()
     return LLMProviderConfig(
-        provider=provider,
-        api_key=settings.LLM_API_KEY,
-        base_url=base_url,
-        model=settings.LLM_MODEL.strip(),
-        timeout_seconds=settings.LLM_TIMEOUT_SECONDS,
-        temperature=settings.LLM_TEMPERATURE,
-        max_output_tokens=settings.LLM_MAX_OUTPUT_TOKENS,
+        provider=resolved.provider,
+        api_key=resolved.api_key,
+        base_url=resolved.base_url,
+        model=resolved.model,
+        timeout_seconds=resolved.timeout_seconds,
+        temperature=resolved.temperature,
+        max_output_tokens=resolved.max_output_tokens,
     )
 
 

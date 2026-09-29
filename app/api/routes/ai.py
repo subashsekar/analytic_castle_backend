@@ -34,6 +34,7 @@ from app.schemas.ai import (
     AIChatResponse,
     AIUsageResponse,
     intent_response,
+    phase8_analysis_response,
     plan_response,
 )
 
@@ -117,9 +118,9 @@ def _authorize_data_source(
     summary="Send an AI analyst chat message",
     description=(
         "AI analyst endpoint. Authenticates the user, authorizes the data source, "
-        "detects analytical intent, resolves relevant catalog metadata, and returns "
-        "a structured request plan. Does not generate SQL, execute queries, or call "
-        "the customer database."
+        "detects analytical intent, resolves catalog metadata, generates and executes "
+        "read-only SQL when the plan requires data access, runs Phase 8 analysis "
+        "agents, and returns a structured response with optional analysis panels."
     ),
     responses={
         **_AUTH_ERRORS,
@@ -157,42 +158,54 @@ async def chat(
                 message=payload.message,
                 data_source_id=payload.data_source_id,
                 request_id=request_id,
+                conversation_id=payload.conversation_id,
+                conversation_version=payload.conversation_version,
             ),
             context,
+            db=db,
         )
+        db.commit()
     except AIRequestValidationError as exc:
+        db.rollback()
         raise _bad_request(str(exc) or INVALID_REQUEST_DETAIL) from None
     except AIContextError:
+        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized",
         ) from None
     except AIConfigurationError:
+        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=PROVIDER_NOT_CONFIGURED_DETAIL,
         ) from None
     except AIProviderTimeoutError:
+        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail=PROVIDER_TIMEOUT_DETAIL,
         ) from None
     except AIProviderRateLimitError:
+        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=PROVIDER_RATE_LIMIT_DETAIL,
         ) from None
     except AIProviderAuthenticationError:
+        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=PROVIDER_UNAVAILABLE_DETAIL,
         ) from None
     except AIResponseValidationError:
+        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=INVALID_RESPONSE_DETAIL,
         ) from None
     except AIProviderError:
+        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=PROVIDER_UNAVAILABLE_DETAIL,
@@ -212,4 +225,7 @@ async def chat(
         plan=plan_response(result.plan),
         metadata_context=result.metadata_context
         or empty_resolved_context(payload.data_source_id),
+        conversation_id=result.conversation_id,
+        conversation_version=result.conversation_version,
+        analysis=phase8_analysis_response(result.phase8_analysis),
     )

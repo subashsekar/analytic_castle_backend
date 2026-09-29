@@ -69,6 +69,15 @@ _ROW_LOCK = re.compile(
 )
 _SELECT_INTO = re.compile(r"\bselect\b[\s\S]*\binto\b", re.IGNORECASE)
 _LEADING_WORD = re.compile(r"[A-Za-z_]+")
+_DANGEROUS_FUNCTIONS = re.compile(
+    r"\b("
+    r"pg_sleep|pg_read_file|pg_write_file|pg_ls_dir|pg_read_binary_file|"
+    r"pg_logdir_ls|pg_execute_server_program|pg_file_write|pg_file_unlink|"
+    r"dblink|dblink_exec|dblink_connect|lo_import|lo_export|"
+    r"current_setting|set_config|pg_get_backend_memory_contexts"
+    r")\s*\(",
+    re.IGNORECASE,
+)
 
 
 def validate_readonly_sql(query: str) -> str:
@@ -93,6 +102,8 @@ def validate_readonly_sql(query: str) -> str:
     if _FORBIDDEN_BODY.search(scanned):
         raise ConnectorQueryError("Unable to query the PostgreSQL data source")
     if _ROW_LOCK.search(scanned) or _SELECT_INTO.search(scanned):
+        raise ConnectorQueryError("Unable to query the PostgreSQL data source")
+    if _DANGEROUS_FUNCTIONS.search(scanned):
         raise ConnectorQueryError("Unable to query the PostgreSQL data source")
     return statement
 

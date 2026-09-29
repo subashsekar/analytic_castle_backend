@@ -56,6 +56,47 @@ _AGGREGATION_PREFIX = re.compile(
     r"^(total|sum|avg|average|count|number of|number|distinct)\s+",
     re.IGNORECASE,
 )
+_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_CATALOG_NOISE_RE = re.compile(
+    r"\b(tables?|columns?|fields?|schema|database)\b",
+    re.IGNORECASE,
+)
+_SEARCH_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "by",
+        "can",
+        "column",
+        "columns",
+        "data",
+        "does",
+        "for",
+        "from",
+        "have",
+        "how",
+        "in",
+        "is",
+        "look",
+        "looks",
+        "me",
+        "more",
+        "most",
+        "of",
+        "or",
+        "related",
+        "show",
+        "table",
+        "tables",
+        "the",
+        "to",
+        "what",
+        "which",
+        "with",
+    }
+)
 _TEMPORAL_MARKERS = ("timestamp", "timestamptz", "datetime", "timetz", "date", "time")
 _DATA_INTENTS = {
     AIIntentType.ANALYTICAL_QUERY,
@@ -89,14 +130,20 @@ class MetadataContextResolver:
         self._session = session
         self._search = MetadataSearchService(session)
 
-    def resolve(self, intent: AIIntent, context: AIContext) -> ResolvedMetadataContext:
+    def resolve(
+        self,
+        intent: AIIntent,
+        context: AIContext,
+        *,
+        message: str | None = None,
+    ) -> ResolvedMetadataContext:
         started = time.perf_counter()
         self._validate_context(context)
         if intent.intent is AIIntentType.UNSUPPORTED:
             return empty_resolved_context(context.data_source_id)
 
         try:
-            resolved = self._resolve_authorized(intent, context)
+            resolved = self._resolve_authorized(intent, context, message=message)
         except DataSourceNotFoundError as exc:
             raise AIContextError("Data source not found") from exc
         except MetadataSearchError:
@@ -134,18 +181,24 @@ class MetadataContextResolver:
             raise AIContextError()
 
     def _resolve_authorized(
-        self, intent: AIIntent, context: AIContext
+        self,
+        intent: AIIntent,
+        context: AIContext,
+        *,
+        message: str | None = None,
     ) -> ResolvedMetadataContext:
-        work = _concepts_from_intent(intent)
+        work = _concepts_from_intent(intent, message=message)
         cache = self._search_terms(context, work)
         table_ranks, column_ranks, concept_columns = _collect_hits(work, cache)
         tables_by_key = self._load_tables(context.data_source_id, set(table_ranks))
         columns_by_key = self._load_columns(context.data_source_id, set(column_ranks))
         table_ids = {table.id for table in tables_by_key.values()}
         primary_keys = self._load_primary_keys(context.data_source_id, table_ids)
+        # Always load temporal columns for matched tables so monthly/date SQL
+        # can validate even when intent.time_range was not parsed.
         time_columns = (
             self._load_time_columns(context.data_source_id, table_ids)
-            if intent.time_range is not None
+            if table_ids
             else ()
         )
 
@@ -158,6 +211,27 @@ class MetadataContextResolver:
             for item in _column_candidates(column_ranks, columns_by_key)
             if item.table_id in allowed_table_ids
         ][: settings.AI_MAX_METADATA_COLUMNS]
+        # Analytical queries need the full matched-table column set (e.g. sale_date),
+        # not only search hits — otherwise SQL validation rejects UNKNOWN_COLUMN.
+        if table_candidates and (
+            intent.intent in _DATA_INTENTS or intent.requires_data_access
+        ):
+            column_candidates = _merge_column_candidates(
+                column_candidates,
+                self._load_schema_question_columns(
+                    context.data_source_id,
+                    {item.table_id for item in table_candidates},
+                ),
+            )
+        elif (
+            intent.intent is AIIntentType.SCHEMA_QUESTION
+            and table_candidates
+            and not column_candidates
+        ):
+            column_candidates = self._load_schema_question_columns(
+                context.data_source_id,
+                {item.table_id for item in table_candidates},
+            )
         allowed_column_ids = {item.column_id for item in column_candidates}
         relationship_candidates = self._load_relationships(
             context.data_source_id,
@@ -215,6 +289,7 @@ class MetadataContextResolver:
             sorts=resolved_sorts,
             time_candidates=time_candidates,
             table_candidates=table_candidates,
+            require_time_disambiguation=intent.time_range is not None,
         )
         requires_clarification = bool(unresolved or ambiguous)
         question = None
@@ -309,6 +384,36 @@ class MetadataContextResolver:
             (column.table.schema.name, column.table.name, column.name): column
             for column in loaded
         }
+
+    def _load_schema_question_columns(
+        self,
+        data_source_id: UUID,
+        table_ids: set[UUID],
+    ) -> list[MetadataColumnCandidate]:
+        if not table_ids:
+            return []
+        stmt = (
+            select(DataSourceColumn)
+            .join(DataSourceTable, DataSourceColumn.table_id == DataSourceTable.id)
+            .join(DataSourceSchema, DataSourceTable.schema_id == DataSourceSchema.id)
+            .options(
+                joinedload(DataSourceColumn.table).joinedload(DataSourceTable.schema)
+            )
+            .where(
+                DataSourceSchema.data_source_id == data_source_id,
+                DataSourceColumn.table_id.in_(table_ids),
+            )
+            .order_by(
+                DataSourceColumn.table_id,
+                DataSourceColumn.ordinal_position,
+                DataSourceColumn.name,
+            )
+        )
+        loaded = self._session.scalars(stmt).unique().all()
+        return [
+            _column_from_loaded(column, match_rank=1)
+            for column in loaded[: settings.AI_MAX_METADATA_COLUMNS]
+        ]
 
     def _load_primary_keys(
         self,
@@ -451,7 +556,11 @@ class MetadataContextResolver:
         ]
 
 
-def _concepts_from_intent(intent: AIIntent) -> list[_ConceptWork]:
+def _concepts_from_intent(
+    intent: AIIntent,
+    *,
+    message: str | None = None,
+) -> list[_ConceptWork]:
     items: list[_ConceptWork] = []
     if intent.subject:
         items.append(_concept("subject", intent.subject))
@@ -463,6 +572,15 @@ def _concepts_from_intent(intent: AIIntent) -> list[_ConceptWork]:
         items.append(_concept("filter", filt.field))
     if intent.sort is not None:
         items.append(_concept("sort", intent.sort.field))
+    if not items and message:
+        for term in expand_metadata_search_terms(message):
+            if term.lower() in _SEARCH_STOPWORDS:
+                continue
+            if len(term) < 3:
+                continue
+            if " " in term.strip():
+                continue
+            items.append(_concept("subject", term))
     return items
 
 
@@ -487,6 +605,18 @@ def _parse_qualified(name: str) -> tuple[str | None, str | None, str | None, str
     return None, None, None, name.strip()
 
 
+def expand_metadata_search_terms(concept: str) -> tuple[str, ...]:
+    """Expand a natural-language question into catalog search terms."""
+    terms = list(_search_terms(concept))
+    for token in _TOKEN_RE.findall(concept):
+        if len(token) < 3:
+            continue
+        if token.lower() in _SEARCH_STOPWORDS:
+            continue
+        terms.append(token)
+    return tuple(dict.fromkeys(term for term in terms if term))
+
+
 def _search_terms(concept: str) -> tuple[str, ...]:
     terms = [concept]
     stripped = concept
@@ -496,6 +626,9 @@ def _search_terms(concept: str) -> tuple[str, ...]:
             break
         terms.append(updated)
         stripped = updated
+    cleaned = " ".join(_CATALOG_NOISE_RE.sub(" ", stripped).split()).strip()
+    if cleaned and cleaned.lower() != stripped.lower():
+        terms.append(cleaned)
     return tuple(dict.fromkeys(term for term in terms if term))
 
 
@@ -629,6 +762,22 @@ def _limit_tables(
     candidates: list[MetadataTableCandidate],
 ) -> list[MetadataTableCandidate]:
     return candidates[: settings.AI_MAX_METADATA_TABLES]
+
+
+def _merge_column_candidates(
+    primary: list[MetadataColumnCandidate],
+    extra: list[MetadataColumnCandidate],
+) -> list[MetadataColumnCandidate]:
+    seen: set[UUID] = set()
+    merged: list[MetadataColumnCandidate] = []
+    for item in (*primary, *extra):
+        if item.column_id in seen:
+            continue
+        seen.add(item.column_id)
+        merged.append(item)
+        if len(merged) >= settings.AI_MAX_METADATA_COLUMNS:
+            break
+    return merged
 
 
 def _table_candidates(
@@ -766,11 +915,12 @@ def _ambiguous_items(
     sorts: list[ConceptColumnResolution],
     time_candidates: list[MetadataColumnCandidate],
     table_candidates: list[MetadataTableCandidate],
+    require_time_disambiguation: bool = False,
 ) -> list[ConceptColumnResolution]:
     ambiguous = [
         item for item in (*metrics, *dimensions, *filters, *sorts) if item.ambiguous
     ]
-    if len(time_candidates) > 1:
+    if require_time_disambiguation and len(time_candidates) > 1:
         ambiguous.append(
             ConceptColumnResolution(
                 requested="time range",

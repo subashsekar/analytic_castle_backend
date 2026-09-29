@@ -8,10 +8,12 @@ from fastapi.responses import JSONResponse
 
 from app.api.routes.ai import router as ai_router
 from app.api.routes.auth import router as auth_router
+from app.api.routes.conversations import router as conversations_router
 from app.api.routes.data_sources import router as data_sources_router
 from app.api.routes.health import router as health_router
 from app.api.routes.metadata import router as metadata_router
 from app.api.routes.organizations import router as organizations_router
+from app.api.routes.query_history import router as query_history_router
 from app.api.routes.workspaces import router as workspaces_router
 from app.core.config import settings
 from app.core.logging import configure_logging, redact_secret
@@ -43,6 +45,8 @@ app.include_router(workspaces_router)
 app.include_router(data_sources_router)
 app.include_router(metadata_router)
 app.include_router(ai_router)
+app.include_router(conversations_router)
+app.include_router(query_history_router)
 
 app.add_middleware(RequestSizeLimitMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
