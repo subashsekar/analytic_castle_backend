@@ -227,6 +227,15 @@ _TOKEN_RE = re.compile(r"token=([A-Za-z0-9_-]+)")
 _T = TypeVar("_T")
 
 
+_INTEGRATION_DIRS = ("integration",)
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    for item in items:
+        if any(part in _INTEGRATION_DIRS for part in item.path.parts):
+            item.add_marker(pytest.mark.integration)
+
+
 def run_async(coro: Coroutine[object, object, _T]) -> _T:
     """Run a coroutine on a psycopg-compatible event loop."""
     if sys.platform == "win32":

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
+from contextvars import ContextVar
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -12,8 +14,21 @@ from app.ai.analysis_pipeline import (
     run_analysis_pipeline,
     should_run_analysis,
 )
-from app.ai.analysis_profile import build_conversation_context
+from app.ai.analysis_profile import (
+    build_analysis_profile,
+    build_analysis_spec,
+    build_conversation_context,
+)
 from app.ai.context import MetadataContextProvider
+from app.ai.follow_up import (
+    apply_follow_up_intent,
+    enrich_conversation_context,
+    looks_like_follow_up,
+    pack_analysis_context,
+    prior_analysis_spec,
+    prior_sql,
+    unpack_prior_intent,
+)
 from app.ai.exceptions import (
     AIContextError,
     AIError,
@@ -28,7 +43,12 @@ from app.ai.intent_types import (
 )
 from app.ai.memory import ConversationMemoryService
 from app.ai.metadata_resolver import MetadataContextResolver
-from app.ai.metadata_types import ResolvedMetadataContext, empty_resolved_context
+from app.ai.metadata_types import (
+    ResolvedMetadataContext,
+    empty_resolved_context,
+    is_identifier_column,
+    is_numeric_type,
+)
 from app.ai.planner import AIRequestPlanner, foundation_response
 from app.ai.planner_agent import (
     PlannerAgent,
@@ -68,6 +88,10 @@ from app.enums import AgentPhase
 
 logger = logging.getLogger(__name__)
 
+_partial_callback: ContextVar[
+    Callable[[dict[str, Any]], Awaitable[None]] | None
+] = ContextVar("ai_chat_partial_callback", default=None)
+
 
 class AIAnalystOrchestrator:
     """Validate context, detect intent, and return a structured plan."""
@@ -96,38 +120,43 @@ class AIAnalystOrchestrator:
         context: AIContext,
         *,
         db: Session | None = None,
+        on_partial: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> AIResponse:
         started = time.perf_counter()
         request_id = request.request_id or get_request_id()
         if not request_id or request_id == "-":
             request_id = new_request_id()
         self._validate(request, context)
-        if db is not None:
-            try:
-                return await self._supervised_chat(
-                    request,
-                    context,
-                    db,
-                    request_id=request_id,
-                    started=started,
-                )
-            except AIError:
-                raise
-            except Exception as exc:
-                from app.ai.planner_agent.errors import PlannerError
-                from app.ai.supervisor.errors import SupervisorError
+        partial_token = _partial_callback.set(on_partial)
+        try:
+            if db is not None:
+                try:
+                    return await self._supervised_chat(
+                        request,
+                        context,
+                        db,
+                        request_id=request_id,
+                        started=started,
+                    )
+                except AIError:
+                    raise
+                except Exception as exc:
+                    from app.ai.planner_agent.errors import PlannerError
+                    from app.ai.supervisor.errors import SupervisorError
 
-                if isinstance(exc, SupervisorError):
-                    raise map_supervisor_error(exc) from exc
-                if isinstance(exc, PlannerError):
-                    raise map_planner_error(exc) from exc
-                raise
-        return await self._legacy_chat(
-            request,
-            context,
-            request_id=request_id,
-            started=started,
-        )
+                    if isinstance(exc, SupervisorError):
+                        raise map_supervisor_error(exc) from exc
+                    if isinstance(exc, PlannerError):
+                        raise map_planner_error(exc) from exc
+                    raise
+            return await self._legacy_chat(
+                request,
+                context,
+                request_id=request_id,
+                started=started,
+            )
+        finally:
+            _partial_callback.reset(partial_token)
 
     async def _legacy_chat(
         self,
@@ -484,12 +513,60 @@ class AIAnalystOrchestrator:
         resolved_intent, plan, metadata_context = _apply_clarification_policy(
             resolved_intent, plan, metadata_context
         )
+        prior_custom = (
+            dict(session.agent_state.payload.custom)
+            if session.agent_state is not None
+            else {}
+        )
+        prior_intent = unpack_prior_intent(prior_custom)
+        if prior_intent is not None and looks_like_follow_up(
+            request.message, resolved_intent
+        ):
+            resolved_intent = apply_follow_up_intent(
+                prior_intent,
+                request.message,
+                resolved_intent,
+                metadata=metadata_context,
+            )
+            plan = self._planner.plan(resolved_intent)
+            if resolved_intent.requires_clarification:
+                plan = plan.model_copy(
+                    update={
+                        "requires_clarification": True,
+                        "clarification_question": resolved_intent.clarification_question,
+                    }
+                )
+            else:
+                metadata_context = self._resolve_metadata(
+                    resolved_intent,
+                    prompt_context,
+                    message=request.message,
+                )
+                resolved_intent, plan, metadata_context = _apply_clarification_policy(
+                    resolved_intent, plan, metadata_context
+                )
         plan = _merge_metadata_plan(plan, metadata_context)
+        if analysis_plan is not None:
+            from app.ai.planner_agent.investigation_steps import attach_investigation_plan
+
+            analysis_plan = attach_investigation_plan(
+                analysis_plan,
+                message=request.message,
+                metadata=metadata_context,
+                intent=resolved_intent,
+            )
 
         phase8_payload = None
         if should_run_analysis(
             plan=plan, intent=resolved_intent, metadata=metadata_context
         ):
+            conversation_context = enrich_conversation_context(
+                build_conversation_context(
+                    conversation_data, current_message=request.message
+                ),
+                last_sql=prior_sql(prior_custom),
+                last_analysis_spec=prior_analysis_spec(prior_custom),
+            )
             session, answer, phase8_payload, plan = await self._execute_analysis(
                 request=request,
                 context=context,
@@ -500,9 +577,7 @@ class AIAnalystOrchestrator:
                 resolved_intent=resolved_intent,
                 plan=plan,
                 metadata_context=metadata_context,
-                conversation_context=build_conversation_context(
-                    conversation_data, current_message=request.message
-                ),
+                conversation_context=conversation_context,
             )
         else:
             answer = _bound_answer(
@@ -612,6 +687,7 @@ class AIAnalystOrchestrator:
                 # optimistic version writes so their updates cannot conflict.
                 expected_agent_version=None,
                 conversation_context=conversation_context,
+                on_partial=_partial_callback.get(),
             )
         )
         answer = _bound_answer(pipeline.answer)
@@ -669,8 +745,63 @@ class AIAnalystOrchestrator:
                     "clarification_question": pipeline.clarification_question,
                 }
             )
+        elif (
+            pipeline.payload is not None
+            and pipeline.payload.sql
+            and not pipeline.failed
+            and session.agent_state is not None
+        ):
+            session = self._store_prior_analysis(
+                state_service,
+                session=session,
+                context=context,
+                sql=pipeline.payload.sql,
+                intent=resolved_intent,
+                plan=plan,
+                metadata_context=metadata_context,
+                message=request.message,
+            )
 
         return session, answer, pipeline.payload, plan
+
+    def _store_prior_analysis(
+        self,
+        state_service: AgentStateService,
+        *,
+        session,
+        context: AIContext,
+        sql: str,
+        intent: AIIntent,
+        plan: AIRequestPlan,
+        metadata_context: ResolvedMetadataContext,
+        message: str,
+    ):
+        """Persist prior SQL/spec/intent on the session for follow-up turns."""
+        profile = build_analysis_profile(message, intent=intent, plan=plan)
+        spec = build_analysis_spec(
+            intent=intent,
+            plan=plan,
+            metadata=metadata_context,
+            profile=profile,
+        )
+        custom = dict(session.agent_state.payload.custom)
+        custom.update(
+            pack_analysis_context(sql=sql, analysis_spec=spec, intent=intent)
+        )
+        try:
+            return state_service.update_agent_state(
+                session.session_id,
+                MergePayloadTransition(updates={"custom": custom}),
+                workspace_id=context.workspace_id,
+                user_id=context.user_id,
+                expected_version=session.agent_state.version,
+            )
+        except Exception:  # noqa: BLE001 — follow-up memory must not fail the answer
+            logger.warning(
+                "prior analysis context persistence failed session_id=%s",
+                session.session_id,
+            )
+            return session
 
     def _persist_assistant_turn(
         self,
@@ -1017,9 +1148,16 @@ def _genuine_clarification(
     metrics = metadata_context.resolved_metrics
     if metrics and not any(item.resolved for item in metrics):
         missing = ", ".join(item.requested for item in metrics[:5])
+        options = [
+            f"{column.table_name}.{column.column_name}"
+            for column in metadata_context.columns
+            if is_numeric_type(column.data_type) and not is_identifier_column(column)
+        ][:6]
+        choices = f" Numeric fields available: {', '.join(options)}." if options else ""
         return (
-            f"I could not find a field for {missing} in this data source. "
-            "Which available field should I use?"
+            f"I could not find a field for {missing} in this data source.{choices} "
+            "Which one should I use? You can also define "
+            f"'{metrics[0].requested}' in the data source glossary."
         )
     asked = intent.requires_clarification or plan.requires_clarification
     ambiguous = [item for item in metrics if item.ambiguous and len(item.candidates) > 1]

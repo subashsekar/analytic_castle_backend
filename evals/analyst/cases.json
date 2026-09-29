@@ -1,0 +1,370 @@
+{
+  "dataset": "analyticcastle_demo",
+  "schema": "public.sales(sale_id pk, sale_date date, product_id, region, units, revenue, orders, aov, conversions)",
+  "notes": "Expected values are computed at run time from reference_sql against the live demo data, so the set stays correct when demo rows change. {seed} in a question is filled from seed_sql; {seed_sql} is the same value as a quoted SQL literal.",
+  "cases": [
+    {
+      "id": "agg_01", "category": "counts_aggregations",
+      "question": "How many sales were made in total?",
+      "expected": {"behavior": "answer", "intents": ["AGGREGATION", "ANALYTICAL_QUERY", "DATA_LOOKUP", "SUMMARY"], "question_types": ["AGGREGATE", "LOOKUP"], "columns": [], "check": "scalar",
+        "reference_sql": "SELECT COUNT(*) AS sales_count FROM public.sales",
+        "alternative_sql": ["SELECT SUM(orders) AS total_orders FROM public.sales"]},
+      "criteria": "Row count of public.sales (SUM(orders) accepted as the per-row order measure); the answer states the count."
+    },
+    {
+      "id": "agg_02", "category": "counts_aggregations",
+      "question": "What is the total revenue?",
+      "expected": {"behavior": "answer", "intents": ["AGGREGATION", "ANALYTICAL_QUERY", "SUMMARY"], "question_types": ["AGGREGATE"], "columns": ["revenue"], "check": "scalar",
+        "reference_sql": "SELECT SUM(revenue) AS total_revenue FROM public.sales"},
+      "criteria": "SUM(revenue) over all rows; the answer states the total."
+    },
+    {
+      "id": "agg_03", "category": "counts_aggregations",
+      "question": "How many units were sold in total?",
+      "expected": {"behavior": "answer", "intents": ["AGGREGATION", "ANALYTICAL_QUERY", "SUMMARY"], "question_types": ["AGGREGATE"], "columns": ["units"], "check": "scalar",
+        "reference_sql": "SELECT SUM(units) AS total_units FROM public.sales"},
+      "criteria": "SUM(units), not COUNT(*): units is a per-row quantity."
+    },
+    {
+      "id": "agg_04", "category": "counts_aggregations",
+      "question": "What is the total number of orders?",
+      "expected": {"behavior": "answer", "intents": ["AGGREGATION", "ANALYTICAL_QUERY", "SUMMARY"], "question_types": ["AGGREGATE"], "columns": ["orders"], "check": "scalar",
+        "reference_sql": "SELECT SUM(orders) AS total_orders FROM public.sales"},
+      "criteria": "orders is a numeric per-row measure, so the total is SUM(orders)."
+    },
+    {
+      "id": "agg_05", "category": "counts_aggregations",
+      "question": "What is the average order value across all sales?",
+      "expected": {"behavior": "answer", "intents": ["AGGREGATION", "ANALYTICAL_QUERY", "SUMMARY"], "question_types": ["AGGREGATE"], "columns": [], "check": "scalar",
+        "reference_sql": "SELECT SUM(revenue) / NULLIF(SUM(orders), 0) AS avg_order_value FROM public.sales",
+        "alternative_sql": ["SELECT AVG(aov) AS avg_aov FROM public.sales"]},
+      "criteria": "Weighted AOV (revenue / orders) or AVG(aov); must not sum aov."
+    },
+    {
+      "id": "agg_06", "category": "counts_aggregations",
+      "question": "How many distinct products have been sold?",
+      "expected": {"behavior": "answer", "intents": ["AGGREGATION", "ANALYTICAL_QUERY", "DATA_LOOKUP", "SUMMARY"], "question_types": ["AGGREGATE", "LOOKUP"], "columns": ["product_id"], "check": "scalar",
+        "reference_sql": "SELECT COUNT(DISTINCT product_id) AS product_count FROM public.sales"},
+      "criteria": "COUNT(DISTINCT product_id)."
+    },
+    {
+      "id": "agg_07", "category": "counts_aggregations",
+      "question": "What is the total number of conversions?",
+      "expected": {"behavior": "answer", "intents": ["AGGREGATION", "ANALYTICAL_QUERY", "SUMMARY"], "question_types": ["AGGREGATE"], "columns": ["conversions"], "check": "scalar",
+        "reference_sql": "SELECT SUM(conversions) AS total_conversions FROM public.sales"},
+      "criteria": "SUM(conversions)."
+    },
+    {
+      "id": "agg_08", "category": "counts_aggregations",
+      "question": "What is the average revenue per sale?",
+      "expected": {"behavior": "answer", "intents": ["AGGREGATION", "ANALYTICAL_QUERY", "SUMMARY"], "question_types": ["AGGREGATE"], "columns": ["revenue"], "check": "scalar",
+        "reference_sql": "SELECT AVG(revenue) AS avg_revenue FROM public.sales"},
+      "criteria": "AVG(revenue) per sale row."
+    },
+    {
+      "id": "flt_01", "category": "filters_dates",
+      "question": "How many sales were made in March 2025?",
+      "expected": {"behavior": "answer", "intents": ["AGGREGATION", "ANALYTICAL_QUERY", "DATA_LOOKUP", "SUMMARY"], "question_types": ["AGGREGATE", "LOOKUP"], "columns": ["sale_date"], "check": "scalar",
+        "reference_sql": "SELECT COUNT(*) AS sales_count FROM public.sales WHERE sale_date >= DATE '2025-03-01' AND sale_date < DATE '2025-04-01'",
+        "alternative_sql": ["SELECT SUM(orders) AS total_orders FROM public.sales WHERE sale_date >= DATE '2025-03-01' AND sale_date < DATE '2025-04-01'"]},
+      "criteria": "Row count restricted to March 2025 with a half-open date range; no clarification."
+    },
+    {
+      "id": "flt_02", "category": "filters_dates",
+      "question": "What was the total revenue in 2025?",
+      "expected": {"behavior": "answer", "intents": ["AGGREGATION", "ANALYTICAL_QUERY", "SUMMARY"], "question_types": ["AGGREGATE"], "columns": ["revenue", "sale_date"], "check": "scalar",
+        "reference_sql": "SELECT SUM(revenue) AS total_revenue FROM public.sales WHERE sale_date >= DATE '2025-01-01' AND sale_date < DATE '2026-01-01'"},
+      "criteria": "SUM(revenue) for calendar 2025."
+    },
+    {
+      "id": "flt_03", "category": "filters_dates",
+      "question": "What was the total revenue in Q1 2025?",
+      "expected": {"behavior": "answer", "intents": ["AGGREGATION", "ANALYTICAL_QUERY", "SUMMARY"], "question_types": ["AGGREGATE"], "columns": ["revenue", "sale_date"], "check": "scalar",
+        "reference_sql": "SELECT SUM(revenue) AS total_revenue FROM public.sales WHERE sale_date >= DATE '2025-01-01' AND sale_date < DATE '2025-04-01'"},
+      "criteria": "Q1 = Jan 1 to Mar 31, 2025."
+    },
+    {
+      "id": "flt_04", "category": "filters_dates",
+      "seed_sql": "SELECT region FROM public.sales GROUP BY region ORDER BY SUM(revenue) DESC LIMIT 1",
+      "question": "What was the total revenue in the {seed} region?",
+      "expected": {"behavior": "answer", "intents": ["AGGREGATION", "ANALYTICAL_QUERY", "SUMMARY", "DATA_LOOKUP"], "question_types": ["AGGREGATE", "LOOKUP"], "columns": ["revenue", "region"], "check": "scalar",
+        "reference_sql": "SELECT SUM(revenue) AS total_revenue FROM public.sales WHERE region = {seed_sql}"},
+      "criteria": "Filter on the region value taken from the data."
+    },
+    {
+      "id": "flt_05", "category": "filters_dates",
+      "seed_sql": "SELECT region FROM public.sales GROUP BY region ORDER BY SUM(units) ASC LIMIT 1",
+      "question": "How many units were sold in the {seed} region in 2025?",
+      "expected": {"behavior": "answer", "intents": ["AGGREGATION", "ANALYTICAL_QUERY", "SUMMARY", "DATA_LOOKUP"], "question_types": ["AGGREGATE", "LOOKUP"], "columns": ["units", "region", "sale_date"], "check": "scalar",
+        "reference_sql": "SELECT SUM(units) AS total_units FROM public.sales WHERE region = {seed_sql} AND sale_date >= DATE '2025-01-01' AND sale_date < DATE '2026-01-01'"},
+      "criteria": "Region filter combined with a year range."
+    },
+    {
+      "id": "flt_06", "category": "filters_dates",
+      "question": "What was the total revenue between February 1 and February 28, 2025?",
+      "expected": {"behavior": "answer", "intents": ["AGGREGATION", "ANALYTICAL_QUERY", "SUMMARY"], "question_types": ["AGGREGATE"], "columns": ["revenue", "sale_date"], "check": "scalar",
+        "reference_sql": "SELECT SUM(revenue) AS total_revenue FROM public.sales WHERE sale_date >= DATE '2025-02-01' AND sale_date < DATE '2025-03-01'"},
+      "criteria": "Explicit inclusive date range covering all of February 2025."
+    },
+    {
+      "id": "flt_07", "category": "filters_dates",
+      "question": "How many sales had revenue above 1000?",
+      "expected": {"behavior": "answer", "intents": ["AGGREGATION", "ANALYTICAL_QUERY", "DATA_LOOKUP", "SUMMARY"], "question_types": ["AGGREGATE", "LOOKUP"], "columns": ["revenue"], "check": "scalar",
+        "reference_sql": "SELECT COUNT(*) AS sales_count FROM public.sales WHERE revenue > 1000"},
+      "criteria": "Numeric filter revenue > 1000 with a row count."
+    },
+    {
+      "id": "rnk_01", "category": "rankings_breakdowns",
+      "question": "Which region had the highest revenue?",
+      "expected": {"behavior": "answer", "intents": ["RANKING", "ANALYTICAL_QUERY", "AGGREGATION", "COMPARISON"], "question_types": ["RANKING"], "columns": ["revenue", "region"], "check": "top_k", "top_k": 1,
+        "reference_sql": "SELECT region, SUM(revenue) AS total_revenue FROM public.sales GROUP BY region ORDER BY total_revenue DESC"},
+      "criteria": "The top region by SUM(revenue) is named in the answer."
+    },
+    {
+      "id": "rnk_02", "category": "rankings_breakdowns",
+      "question": "Top 5 products by revenue",
+      "expected": {"behavior": "answer", "intents": ["RANKING", "ANALYTICAL_QUERY", "AGGREGATION"], "question_types": ["RANKING"], "columns": ["revenue", "product_id"], "check": "top_k", "top_k": 5,
+        "reference_sql": "SELECT product_id, SUM(revenue) AS total_revenue FROM public.sales GROUP BY product_id ORDER BY total_revenue DESC LIMIT 5"},
+      "criteria": "The same five product_ids in the same order."
+    },
+    {
+      "id": "rnk_03", "category": "rankings_breakdowns",
+      "question": "Show revenue by region",
+      "expected": {"behavior": "answer", "intents": ["AGGREGATION", "ANALYTICAL_QUERY", "COMPARISON", "RANKING"], "question_types": ["BREAKDOWN"], "columns": ["revenue", "region"], "check": "breakdown",
+        "reference_sql": "SELECT region, SUM(revenue) AS total_revenue FROM public.sales GROUP BY region ORDER BY total_revenue DESC"},
+      "criteria": "Every region with its SUM(revenue)."
+    },
+    {
+      "id": "rnk_04", "category": "rankings_breakdowns",
+      "question": "Show units sold by region",
+      "expected": {"behavior": "answer", "intents": ["AGGREGATION", "ANALYTICAL_QUERY", "COMPARISON", "RANKING"], "question_types": ["BREAKDOWN"], "columns": ["units", "region"], "check": "breakdown",
+        "reference_sql": "SELECT region, SUM(units) AS total_units FROM public.sales GROUP BY region ORDER BY total_units DESC"},
+      "criteria": "Every region with its SUM(units)."
+    },
+    {
+      "id": "rnk_05", "category": "rankings_breakdowns",
+      "question": "Which 3 products sold the most units?",
+      "expected": {"behavior": "answer", "intents": ["RANKING", "ANALYTICAL_QUERY", "AGGREGATION"], "question_types": ["RANKING"], "columns": ["units", "product_id"], "check": "top_k", "top_k": 3,
+        "reference_sql": "SELECT product_id, SUM(units) AS total_units FROM public.sales GROUP BY product_id ORDER BY total_units DESC LIMIT 3"},
+      "criteria": "Top three product_ids by SUM(units)."
+    },
+    {
+      "id": "rnk_06", "category": "rankings_breakdowns",
+      "question": "Which region had the lowest number of orders?",
+      "expected": {"behavior": "answer", "intents": ["RANKING", "ANALYTICAL_QUERY", "AGGREGATION", "COMPARISON"], "question_types": ["RANKING"], "columns": ["orders", "region"], "check": "top_k", "top_k": 1,
+        "reference_sql": "SELECT region, SUM(orders) AS total_orders FROM public.sales GROUP BY region ORDER BY total_orders ASC"},
+      "criteria": "Bottom region by SUM(orders), ascending."
+    },
+    {
+      "id": "rnk_07", "category": "rankings_breakdowns",
+      "question": "Show total conversions by region",
+      "expected": {"behavior": "answer", "intents": ["AGGREGATION", "ANALYTICAL_QUERY", "COMPARISON", "RANKING"], "question_types": ["BREAKDOWN"], "columns": ["conversions", "region"], "check": "breakdown",
+        "reference_sql": "SELECT region, SUM(conversions) AS total_conversions FROM public.sales GROUP BY region ORDER BY total_conversions DESC"},
+      "criteria": "Every region with SUM(conversions)."
+    },
+    {
+      "id": "rnk_08", "category": "rankings_breakdowns",
+      "question": "Rank regions by average order value",
+      "expected": {"behavior": "answer", "intents": ["RANKING", "ANALYTICAL_QUERY", "AGGREGATION", "COMPARISON"], "question_types": ["RANKING"], "columns": ["region"], "check": "top_k", "top_k": 1,
+        "reference_sql": "SELECT region, SUM(revenue) / NULLIF(SUM(orders), 0) AS avg_order_value FROM public.sales GROUP BY region ORDER BY avg_order_value DESC",
+        "alternative_sql": ["SELECT region, AVG(aov) AS avg_aov FROM public.sales GROUP BY region ORDER BY avg_aov DESC"]},
+      "criteria": "The top region by weighted AOV (or AVG(aov)); aov must not be summed."
+    },
+    {
+      "id": "trd_01", "category": "trends_comparisons",
+      "question": "Show the monthly revenue trend for 2025",
+      "expected": {"behavior": "answer", "intents": ["TREND_ANALYSIS", "ANALYTICAL_QUERY", "AGGREGATION"], "question_types": ["TREND"], "columns": ["revenue", "sale_date"], "check": "series",
+        "reference_sql": "SELECT date_trunc('month', sale_date) AS period, SUM(revenue) AS total_revenue FROM public.sales WHERE sale_date >= DATE '2025-01-01' AND sale_date < DATE '2026-01-01' GROUP BY 1 ORDER BY 1"},
+      "criteria": "One row per 2025 month with SUM(revenue)."
+    },
+    {
+      "id": "trd_02", "category": "trends_comparisons",
+      "question": "How have monthly units sold changed over time?",
+      "expected": {"behavior": "answer", "intents": ["TREND_ANALYSIS", "ANALYTICAL_QUERY", "AGGREGATION"], "question_types": ["TREND"], "columns": ["units", "sale_date"], "check": "series",
+        "reference_sql": "SELECT date_trunc('month', sale_date) AS period, SUM(units) AS total_units FROM public.sales GROUP BY 1 ORDER BY 1"},
+      "criteria": "Monthly SUM(units) across all data."
+    },
+    {
+      "id": "trd_03", "category": "trends_comparisons",
+      "question": "Show total orders by month",
+      "expected": {"behavior": "answer", "intents": ["TREND_ANALYSIS", "ANALYTICAL_QUERY", "AGGREGATION"], "question_types": ["TREND", "BREAKDOWN"], "columns": ["orders", "sale_date"], "check": "series",
+        "reference_sql": "SELECT date_trunc('month', sale_date) AS period, SUM(orders) AS total_orders FROM public.sales GROUP BY 1 ORDER BY 1"},
+      "criteria": "Monthly SUM(orders)."
+    },
+    {
+      "id": "trd_04", "category": "trends_comparisons",
+      "question": "Compare revenue in February 2025 vs March 2025",
+      "expected": {"behavior": "answer", "intents": ["COMPARISON", "TREND_ANALYSIS", "ANALYTICAL_QUERY", "AGGREGATION"], "question_types": ["COMPARISON"], "columns": ["revenue", "sale_date"], "check": "series",
+        "reference_sql": "SELECT date_trunc('month', sale_date) AS period, SUM(revenue) AS total_revenue FROM public.sales WHERE sale_date >= DATE '2025-02-01' AND sale_date < DATE '2025-04-01' GROUP BY 1 ORDER BY 1"},
+      "criteria": "Both months with SUM(revenue); the answer states both values or the change."
+    },
+    {
+      "id": "trd_05", "category": "trends_comparisons",
+      "question": "Compare revenue by region for January 2025 and February 2025",
+      "expected": {"behavior": "answer", "intents": ["COMPARISON", "TREND_ANALYSIS", "ANALYTICAL_QUERY", "AGGREGATION"], "question_types": ["COMPARISON", "BREAKDOWN"], "columns": ["revenue", "region", "sale_date"], "check": "nonempty",
+        "reference_sql": "SELECT date_trunc('month', sale_date) AS period, region, SUM(revenue) AS total_revenue FROM public.sales WHERE sale_date >= DATE '2025-01-01' AND sale_date < DATE '2025-03-01' GROUP BY 1, 2 ORDER BY 1, 2"},
+      "criteria": "Rows per month and region; no unsupported numbers."
+    },
+    {
+      "id": "trd_06", "category": "trends_comparisons",
+      "question": "Is revenue growing or declining month over month?",
+      "expected": {"behavior": "answer", "intents": ["TREND_ANALYSIS", "COMPARISON", "ANALYTICAL_QUERY"], "question_types": ["TREND", "COMPARISON"], "columns": ["revenue", "sale_date"], "check": "series",
+        "reference_sql": "SELECT date_trunc('month', sale_date) AS period, SUM(revenue) AS total_revenue FROM public.sales GROUP BY 1 ORDER BY 1"},
+      "criteria": "Monthly revenue series; the direction claim matches the data."
+    },
+    {
+      "id": "trd_07", "category": "trends_comparisons",
+      "question": "What was the month-over-month change in revenue from February to March 2025?",
+      "expected": {"behavior": "answer", "intents": ["COMPARISON", "TREND_ANALYSIS", "ANALYTICAL_QUERY", "AGGREGATION"], "question_types": ["COMPARISON", "TREND"], "columns": ["revenue", "sale_date"], "check": "series",
+        "reference_sql": "SELECT date_trunc('month', sale_date) AS period, SUM(revenue) AS total_revenue FROM public.sales WHERE sale_date >= DATE '2025-02-01' AND sale_date < DATE '2025-04-01' GROUP BY 1 ORDER BY 1"},
+      "criteria": "Change = March - February; the stated difference or percent must follow from the two totals."
+    },
+    {
+      "id": "trd_08", "category": "trends_comparisons",
+      "question": "Show weekly revenue for March 2025",
+      "expected": {"behavior": "answer", "intents": ["TREND_ANALYSIS", "ANALYTICAL_QUERY", "AGGREGATION"], "question_types": ["TREND"], "columns": ["revenue", "sale_date"], "check": "series",
+        "reference_sql": "SELECT date_trunc('week', sale_date) AS period, SUM(revenue) AS total_revenue FROM public.sales WHERE sale_date >= DATE '2025-03-01' AND sale_date < DATE '2025-04-01' GROUP BY 1 ORDER BY 1"},
+      "criteria": "Weekly buckets within March 2025."
+    },
+    {
+      "id": "anm_01", "category": "anomalies_root_cause",
+      "question": "Were there any unusual spikes or drops in monthly revenue?",
+      "expected": {"behavior": "answer", "intents": ["TREND_ANALYSIS", "ANALYTICAL_QUERY", "SUMMARY"], "question_types": ["ANOMALY"], "columns": ["revenue", "sale_date"], "check": "series",
+        "reference_sql": "SELECT date_trunc('month', sale_date) AS period, SUM(revenue) AS total_revenue FROM public.sales GROUP BY 1 ORDER BY 1"},
+      "criteria": "A monthly series; any flagged month must exist in the data with the stated value."
+    },
+    {
+      "id": "anm_02", "category": "anomalies_root_cause",
+      "question": "Are there any anomalies in daily revenue in March 2025?",
+      "expected": {"behavior": "answer", "intents": ["TREND_ANALYSIS", "ANALYTICAL_QUERY", "SUMMARY"], "question_types": ["ANOMALY"], "columns": ["revenue", "sale_date"], "check": "series",
+        "reference_sql": "SELECT date_trunc('day', sale_date) AS period, SUM(revenue) AS total_revenue FROM public.sales WHERE sale_date >= DATE '2025-03-01' AND sale_date < DATE '2025-04-01' GROUP BY 1 ORDER BY 1"},
+      "criteria": "A daily series for March 2025; anomaly claims are grounded in it."
+    },
+    {
+      "id": "anm_03", "category": "anomalies_root_cause",
+      "question": "Which region shows unusual revenue compared to the others?",
+      "expected": {"behavior": "answer", "intents": ["COMPARISON", "RANKING", "ANALYTICAL_QUERY", "TREND_ANALYSIS"], "question_types": ["ANOMALY", "COMPARISON"], "columns": ["revenue", "region"], "check": "breakdown",
+        "reference_sql": "SELECT region, SUM(revenue) AS total_revenue FROM public.sales GROUP BY region ORDER BY total_revenue DESC"},
+      "criteria": "Revenue per region; the outlier named must be the highest or lowest region."
+    },
+    {
+      "id": "rca_01", "category": "anomalies_root_cause",
+      "question": "Why did revenue fall in March 2025?",
+      "expected": {"behavior": "answer", "intents": ["ANALYTICAL_QUERY", "TREND_ANALYSIS", "COMPARISON"], "question_types": ["DIAGNOSTIC"], "columns": ["revenue", "sale_date"], "check": "nonempty",
+        "reference_sql": "SELECT date_trunc('month', sale_date) AS period, region, SUM(revenue) AS total_revenue FROM public.sales WHERE sale_date >= DATE '2025-02-01' AND sale_date < DATE '2025-04-01' GROUP BY 1, 2 ORDER BY 1, 2",
+        "must_include_any": ["hypothes", "likely cause", "driver", "contribut"]},
+      "criteria": "Measured change for March vs February plus drivers by a dimension; causes labelled as hypotheses."
+    },
+    {
+      "id": "rca_02", "category": "anomalies_root_cause",
+      "question": "What drove the change in revenue between February and March 2025 by region?",
+      "expected": {"behavior": "answer", "intents": ["ANALYTICAL_QUERY", "COMPARISON", "TREND_ANALYSIS"], "question_types": ["DIAGNOSTIC", "COMPARISON"], "columns": ["revenue", "region", "sale_date"], "check": "nonempty",
+        "reference_sql": "SELECT date_trunc('month', sale_date) AS period, region, SUM(revenue) AS total_revenue FROM public.sales WHERE sale_date >= DATE '2025-02-01' AND sale_date < DATE '2025-04-01' GROUP BY 1, 2 ORDER BY 1, 2",
+        "must_include_any": ["region"]},
+      "criteria": "Per-region change February to March; the largest contributor is named."
+    },
+    {
+      "id": "rca_03", "category": "anomalies_root_cause",
+      "question": "Why did units sold drop in the latest month compared to the previous month?",
+      "expected": {"behavior": "answer", "intents": ["ANALYTICAL_QUERY", "TREND_ANALYSIS", "COMPARISON"], "question_types": ["DIAGNOSTIC"], "columns": ["units", "sale_date"], "check": "nonempty",
+        "reference_sql": "SELECT date_trunc('month', sale_date) AS period, SUM(units) AS total_units FROM public.sales GROUP BY 1 ORDER BY 1",
+        "must_include_any": ["hypothes", "likely cause", "driver", "contribut", "not drop", "did not", "increase"]},
+      "criteria": "Uses the latest two months in the data; if units did not drop, the answer says so instead of inventing a cause."
+    },
+    {
+      "id": "rca_04", "category": "anomalies_root_cause",
+      "question": "Which products contributed most to the revenue change from February to March 2025?",
+      "expected": {"behavior": "answer", "intents": ["ANALYTICAL_QUERY", "RANKING", "COMPARISON"], "question_types": ["DIAGNOSTIC", "RANKING"], "columns": ["revenue", "product_id", "sale_date"], "check": "nonempty",
+        "reference_sql": "SELECT product_id, SUM(CASE WHEN sale_date >= DATE '2025-03-01' THEN revenue ELSE 0 END) - SUM(CASE WHEN sale_date < DATE '2025-03-01' THEN revenue ELSE 0 END) AS revenue_change FROM public.sales WHERE sale_date >= DATE '2025-02-01' AND sale_date < DATE '2025-04-01' GROUP BY product_id ORDER BY ABS(SUM(CASE WHEN sale_date >= DATE '2025-03-01' THEN revenue ELSE 0 END) - SUM(CASE WHEN sale_date < DATE '2025-03-01' THEN revenue ELSE 0 END)) DESC"},
+      "criteria": "Products ranked by absolute revenue change; the named products match the data."
+    },
+    {
+      "id": "ins_01", "category": "insights_recommendations",
+      "question": "What are the key insights from 2025 sales?",
+      "expected": {"behavior": "answer", "intents": ["SUMMARY", "ANALYTICAL_QUERY", "TREND_ANALYSIS"], "question_types": ["INSIGHT"], "columns": ["sale_date"], "check": "nonempty",
+        "reference_sql": "SELECT date_trunc('month', sale_date) AS period, SUM(revenue) AS total_revenue, SUM(units) AS total_units, SUM(orders) AS total_orders FROM public.sales WHERE sale_date >= DATE '2025-01-01' AND sale_date < DATE '2026-01-01' GROUP BY 1 ORDER BY 1"},
+      "criteria": "Insights cite measured 2025 figures only."
+    },
+    {
+      "id": "ins_02", "category": "insights_recommendations",
+      "question": "Summarize sales performance by region",
+      "expected": {"behavior": "answer", "intents": ["SUMMARY", "ANALYTICAL_QUERY", "AGGREGATION", "COMPARISON"], "question_types": ["INSIGHT", "BREAKDOWN"], "columns": ["region"], "check": "nonempty",
+        "reference_sql": "SELECT region, SUM(revenue) AS total_revenue, SUM(units) AS total_units, SUM(orders) AS total_orders FROM public.sales GROUP BY region ORDER BY total_revenue DESC"},
+      "criteria": "Per-region summary; stated figures match the per-region totals."
+    },
+    {
+      "id": "ins_03", "category": "insights_recommendations",
+      "question": "Which region has the best conversion performance?",
+      "expected": {"behavior": "answer", "intents": ["RANKING", "ANALYTICAL_QUERY", "COMPARISON"], "question_types": ["RANKING", "INSIGHT"], "columns": ["conversions", "region"], "check": "nonempty",
+        "reference_sql": "SELECT region, SUM(conversions) AS total_conversions, SUM(conversions)::numeric / NULLIF(SUM(orders), 0) AS conversions_per_order FROM public.sales GROUP BY region ORDER BY total_conversions DESC"},
+      "criteria": "Uses conversions per region (total or rate) and says which definition it used."
+    },
+    {
+      "id": "rec_01", "category": "insights_recommendations",
+      "question": "What should we do to improve revenue next quarter?",
+      "expected": {"behavior": "answer", "intents": ["ANALYTICAL_QUERY", "SUMMARY", "TREND_ANALYSIS"], "question_types": ["RECOMMENDATION"], "columns": ["revenue"], "check": "nonempty",
+        "reference_sql": "SELECT region, SUM(revenue) AS total_revenue FROM public.sales GROUP BY region ORDER BY total_revenue DESC",
+        "must_include_any": ["recommend", "focus", "consider", "should"]},
+      "criteria": "Recommendations are tied to measured facts and kept separate from them."
+    },
+    {
+      "id": "rec_02", "category": "insights_recommendations",
+      "question": "Based on the data, where should we focus sales efforts?",
+      "expected": {"behavior": "answer", "intents": ["ANALYTICAL_QUERY", "SUMMARY", "RANKING", "COMPARISON"], "question_types": ["RECOMMENDATION"], "columns": [], "check": "nonempty",
+        "reference_sql": "SELECT region, SUM(revenue) AS total_revenue, SUM(units) AS total_units FROM public.sales GROUP BY region ORDER BY total_revenue DESC",
+        "must_include_any": ["recommend", "focus", "consider", "should"]},
+      "criteria": "A focus area grounded in the per-region or per-product numbers."
+    },
+    {
+      "id": "amb_01", "category": "ambiguous_followups",
+      "question": "Show sales.",
+      "expected": {"behavior": "clarify", "intents": ["UNKNOWN", "SUMMARY", "DATA_LOOKUP", "ANALYTICAL_QUERY"], "question_types": [], "columns": [], "check": "none"},
+      "criteria": "Ambiguous metric and grouping; asks what to show and offers real fields."
+    },
+    {
+      "id": "amb_02", "category": "ambiguous_followups",
+      "question": "What is the profit margin by region?",
+      "expected": {"behavior": "clarify", "intents": ["AGGREGATION", "ANALYTICAL_QUERY", "COMPARISON", "UNKNOWN"], "question_types": [], "columns": [], "check": "none",
+        "forbidden_terms": ["profit margin was", "margin of"]},
+      "criteria": "No profit or cost column exists; must not substitute revenue. Asks or explains the gap."
+    },
+    {
+      "id": "amb_03", "category": "ambiguous_followups",
+      "question": "Show the customer churn rate",
+      "expected": {"behavior": "clarify", "intents": ["AGGREGATION", "ANALYTICAL_QUERY", "TREND_ANALYSIS", "UNKNOWN"], "question_types": [], "columns": [], "check": "none",
+        "forbidden_terms": ["churn rate was", "churn rate is"]},
+      "criteria": "No customer or churn data; must not invent a rate."
+    },
+    {
+      "id": "ref_01", "category": "ambiguous_followups",
+      "question": "Delete all sales from March 2025.",
+      "expected": {"behavior": "refuse", "intents": ["UNSUPPORTED"], "question_types": [], "columns": [], "check": "none"},
+      "criteria": "Write request refused; no SQL executed."
+    },
+    {
+      "id": "fu_01", "category": "ambiguous_followups",
+      "setup": ["What was the total revenue in 2025?"],
+      "question": "Break that down by region",
+      "expected": {"behavior": "answer", "intents": ["AGGREGATION", "ANALYTICAL_QUERY", "COMPARISON", "RANKING"], "question_types": ["BREAKDOWN"], "columns": ["revenue", "region"], "check": "breakdown",
+        "reference_sql": "SELECT region, SUM(revenue) AS total_revenue FROM public.sales WHERE sale_date >= DATE '2025-01-01' AND sale_date < DATE '2026-01-01' GROUP BY region ORDER BY total_revenue DESC"},
+      "criteria": "Keeps the metric (revenue) and the 2025 filter from the previous turn."
+    },
+    {
+      "id": "fu_02", "category": "ambiguous_followups",
+      "setup": ["Show revenue by region"],
+      "question": "Only for March 2025",
+      "expected": {"behavior": "answer", "intents": ["AGGREGATION", "ANALYTICAL_QUERY", "COMPARISON", "RANKING", "DATA_LOOKUP"], "question_types": ["BREAKDOWN", "AGGREGATE"], "columns": ["revenue", "region", "sale_date"], "check": "breakdown",
+        "reference_sql": "SELECT region, SUM(revenue) AS total_revenue FROM public.sales WHERE sale_date >= DATE '2025-03-01' AND sale_date < DATE '2025-04-01' GROUP BY region ORDER BY total_revenue DESC"},
+      "criteria": "Revenue by region restricted to March 2025."
+    },
+    {
+      "id": "fu_03", "category": "ambiguous_followups",
+      "setup": ["How many sales were made in March 2025?"],
+      "question": "And in February?",
+      "expected": {"behavior": "answer", "intents": ["AGGREGATION", "ANALYTICAL_QUERY", "DATA_LOOKUP", "SUMMARY", "COMPARISON"], "question_types": ["AGGREGATE", "LOOKUP", "COMPARISON"], "columns": ["sale_date"], "check": "scalar",
+        "reference_sql": "SELECT COUNT(*) AS sales_count FROM public.sales WHERE sale_date >= DATE '2025-02-01' AND sale_date < DATE '2025-03-01'",
+        "alternative_sql": ["SELECT SUM(orders) AS total_orders FROM public.sales WHERE sale_date >= DATE '2025-02-01' AND sale_date < DATE '2025-03-01'"]},
+      "criteria": "Same count, now for February 2025."
+    }
+  ]
+}

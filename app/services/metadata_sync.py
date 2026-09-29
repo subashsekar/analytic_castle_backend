@@ -158,6 +158,9 @@ class MetadataSyncService:
                 relationship_count=counts.relationships,
             )
             self._session.commit()
+            from app.ai.sql_generation.schema_cache import invalidate_schema_context_cache
+
+            invalidate_schema_context_cache(data_source_id)
         except asyncio.CancelledError:
             self._record_failure(
                 data_source_id,

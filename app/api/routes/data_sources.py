@@ -2,8 +2,10 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.ai.glossary import parse_glossary
 from app.api.deps import (
     get_current_user,
     load_workspace_access,
@@ -19,6 +21,7 @@ from app.schemas.auth import MessageResponse
 from app.schemas.data_source import (
     ConnectionTestResponse,
     DataSourceCreate,
+    DataSourceGlossary,
     DataSourceRead,
     DataSourceUpdate,
 )
@@ -189,6 +192,70 @@ def update_data_source(
         return DataSourceService(db).update(access.data_source, name=payload.name)
     except DataSourceWriteError:
         raise _conflict(DATA_SOURCE_WRITE_DETAIL) from None
+
+
+@router.get(
+    "/{data_source_id}/glossary",
+    response_model=DataSourceGlossary,
+    summary="Get the data source business glossary",
+    description="Metric synonyms and definitions the AI analyst uses to map questions to columns.",
+    responses={
+        **_AUTH_ERRORS,
+        status.HTTP_404_NOT_FOUND: {"description": "Data source not found"},
+    },
+)
+def get_data_source_glossary(
+    access: Annotated[
+        DataSourceAccess,
+        Depends(
+            require_data_source_permission(
+                WorkspacePermission.DATA_SOURCE_READ,
+                allow_super_admin=True,
+            )
+        ),
+    ],
+) -> DataSourceGlossary:
+    return DataSourceGlossary(entries=parse_glossary(access.data_source.business_glossary))
+
+
+@router.put(
+    "/{data_source_id}/glossary",
+    response_model=DataSourceGlossary,
+    summary="Replace the data source business glossary",
+    description=(
+        "Replace glossary entries. Entries describe business meaning only; "
+        "they never contain SQL and only take effect for existing catalog columns."
+    ),
+    responses={
+        **_AUTH_ERRORS,
+        status.HTTP_404_NOT_FOUND: {"description": "Data source not found"},
+        status.HTTP_409_CONFLICT: {"description": "Unable to save data source"},
+        status.HTTP_422_UNPROCESSABLE_CONTENT: {"description": "Validation error"},
+    },
+)
+def replace_data_source_glossary(
+    payload: DataSourceGlossary,
+    access: Annotated[
+        DataSourceAccess,
+        Depends(
+            require_data_source_permission(
+                WorkspacePermission.DATA_SOURCE_UPDATE,
+                allow_super_admin=True,
+            )
+        ),
+    ],
+    db: Annotated[Session, Depends(get_db)],
+) -> DataSourceGlossary:
+    source = access.data_source
+    source.business_glossary = [
+        entry.model_dump(mode="json", exclude_none=True) for entry in payload.entries
+    ]
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise _conflict(DATA_SOURCE_WRITE_DETAIL) from None
+    return DataSourceGlossary(entries=parse_glossary(source.business_glossary))
 
 
 @router.delete(

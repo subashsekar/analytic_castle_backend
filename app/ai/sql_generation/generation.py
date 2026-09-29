@@ -30,9 +30,9 @@ from app.ai.sql_generation.prompts import (
     SQL_GENERATION_USER_TEMPLATE_ID,
     SQLGenerationVariables,
 )
+from app.ai.sql_generation.schema_cache import cached_schema_prompt_context
 from app.ai.sql_generation.schema_context import (
     SchemaPromptContext,
-    build_schema_prompt_context,
     has_usable_schema,
 )
 from app.ai.sql_generation.validation import normalize_sql_output, parse_llm_sql
@@ -57,7 +57,7 @@ async def generate_sql(
     if not has_usable_schema(metadata):
         raise SQLGenerationSchemaError("Schema context is required for SQL generation")
 
-    schema = schema_context or build_schema_prompt_context(metadata)
+    schema = schema_context or cached_schema_prompt_context(metadata)
     if not schema.text.strip() or schema.table_count + schema.column_count == 0:
         raise SQLGenerationSchemaError("Schema context is required for SQL generation")
 

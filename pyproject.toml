@@ -37,6 +37,10 @@ packages = ["app"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+addopts = "-p no:django"
+markers = [
+    "integration: end-to-end flows (full chat pipeline, live MCP/Postgres); deselect with -m 'not integration'",
+]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/conftest.py" = ["E402"]

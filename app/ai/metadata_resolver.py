@@ -14,10 +14,18 @@ from typing import Literal, TypeVar
 from uuid import UUID
 
 from sqlalchemy import func, or_, select, tuple_
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, aliased, joinedload
 
 from app.ai.exceptions import AIContextError
-from app.ai.intent_types import AIIntent, AIIntentType, _looks_like_sql
+from app.ai.glossary import (
+    GlossaryEntry,
+    concept_variants,
+    match_glossary,
+    normalize_concept,
+    parse_glossary,
+)
+from app.ai.intent_types import AggregationType, AIIntent, AIIntentType, _looks_like_sql
 from app.ai.metadata_types import (
     ConceptColumnResolution,
     MetadataColumnCandidate,
@@ -27,11 +35,14 @@ from app.ai.metadata_types import (
     MetadataTableCandidate,
     ResolvedMetadataContext,
     empty_resolved_context,
+    is_identifier_column,
+    is_numeric_type,
 )
 from app.ai.types import AIContext
 from app.core.config import settings
 from app.core.request_id import get_request_id
 from app.db.models import (
+    DataSource,
     DataSourceColumn,
     DataSourceRelationship,
     DataSourceSchema,
@@ -59,6 +70,10 @@ _AGGREGATION_PREFIX = re.compile(
 _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _CATALOG_NOISE_RE = re.compile(
     r"\b(tables?|columns?|fields?|schema|database)\b",
+    re.IGNORECASE,
+)
+_MEASURE_NOISE_RE = re.compile(
+    r"\b(sold|made|shipped|booked|recorded|completed|purchased|placed)\b",
     re.IGNORECASE,
 )
 _SEARCH_STOPWORDS = frozenset(
@@ -187,7 +202,10 @@ class MetadataContextResolver:
         *,
         message: str | None = None,
     ) -> ResolvedMetadataContext:
-        work = _concepts_from_intent(intent, message=message)
+        glossary = self._load_glossary(context)
+        work, glossary_hits = _apply_glossary(
+            _concepts_from_intent(intent, message=message), glossary
+        )
         cache = self._search_terms(context, work)
         table_ranks, column_ranks, concept_columns = _collect_hits(work, cache)
         tables_by_key = self._load_tables(context.data_source_id, set(table_ranks))
@@ -272,6 +290,30 @@ class MetadataContextResolver:
             if column.table_id in allowed_table_ids
         ][: settings.AI_MAX_METADATA_COLUMNS]
 
+        aggregations = {metric.name: metric.aggregation for metric in intent.metrics}
+        resolved_metrics = [
+            _refine_metric(
+                item,
+                aggregation=aggregations.get(item.requested, AggregationType.NONE),
+                glossary_entry=glossary_hits.get(f"metric:{item.requested}"),
+                tables=table_candidates,
+                columns=column_candidates,
+            )
+            for item in resolved_metrics
+        ]
+        # A metric's own table decides the date column; only ask when that
+        # table itself has several temporal columns.
+        metric_tables = {
+            candidate.table_id
+            for item in resolved_metrics
+            for candidate in item.candidates
+        }
+        metric_time = [item for item in time_candidates if item.table_id in metric_tables]
+        if metric_time:
+            time_candidates = metric_time + [
+                item for item in time_candidates if item.table_id not in metric_tables
+            ]
+
         unresolved = _unresolved_concepts(
             intent=intent,
             work=work,
@@ -287,7 +329,7 @@ class MetadataContextResolver:
             dimensions=resolved_dimensions,
             filters=resolved_filters,
             sorts=resolved_sorts,
-            time_candidates=time_candidates,
+            time_candidates=metric_time or time_candidates,
             table_candidates=table_candidates,
             require_time_disambiguation=intent.time_range is not None,
         )
@@ -309,9 +351,30 @@ class MetadataContextResolver:
             resolved_filters=resolved_filters,
             resolved_time_columns=time_candidates,
             unresolved_concepts=unresolved,
+            glossary=_relevant_glossary(glossary, glossary_hits, message),
             requires_clarification=requires_clarification,
             clarification_question=question,
         )
+
+    def _load_glossary(self, context: AIContext) -> list[GlossaryEntry]:
+        # Savepoint: a database without the glossary column must not poison the
+        # caller's transaction; resolution simply proceeds without a glossary.
+        try:
+            with self._session.begin_nested():
+                raw = self._session.scalar(
+                    select(DataSource.business_glossary).where(
+                        DataSource.id == context.data_source_id,
+                        DataSource.workspace_id == context.workspace_id,
+                    )
+                )
+        except SQLAlchemyError:
+            logger.warning(
+                "AI glossary unavailable request_id=%s data_source_id=%s",
+                get_request_id(),
+                context.data_source_id,
+            )
+            return []
+        return parse_glossary(raw)
 
     def _search_terms(
         self,
@@ -619,7 +682,18 @@ def expand_metadata_search_terms(concept: str) -> tuple[str, ...]:
 
 def _search_terms(concept: str) -> tuple[str, ...]:
     terms = [concept]
-    stripped = concept
+    spaced = " ".join(concept.lower().replace("_", " ").split())
+    if spaced and spaced != concept.lower():
+        terms.append(spaced)
+    words = spaced.split()
+    if len(words) >= 2:
+        acronym = "".join(word[0] for word in words if word)
+        if len(acronym) >= 3:
+            terms.append(acronym)
+    normalized = normalize_concept(concept)
+    if normalized and normalized not in {concept.lower(), spaced}:
+        terms.append(normalized)
+    stripped = normalized or spaced or concept
     while True:
         updated = _AGGREGATION_PREFIX.sub("", stripped, count=1).strip()
         if not updated or updated.lower() == stripped.lower():
@@ -629,6 +703,19 @@ def _search_terms(concept: str) -> tuple[str, ...]:
     cleaned = " ".join(_CATALOG_NOISE_RE.sub(" ", stripped).split()).strip()
     if cleaned and cleaned.lower() != stripped.lower():
         terms.append(cleaned)
+        stripped = cleaned
+    de_noised = " ".join(_MEASURE_NOISE_RE.sub(" ", stripped).split()).strip()
+    if de_noised and de_noised.lower() != stripped.lower():
+        terms.append(de_noised)
+        stripped = de_noised
+    for token in stripped.split():
+        if len(token) >= 3 and token.lower() not in _SEARCH_STOPWORDS:
+            terms.append(token)
+    # "sales count" / "sales_count" / "number of customers" -> also search the entity.
+    if _COUNT_CUE_RE.search(concept) or _COUNT_CUE_RE.search(normalized or spaced):
+        entity = " ".join(_COUNT_WORDS_RE.sub(" ", normalized or spaced).split()).strip()
+        if entity and entity.lower() != concept.lower():
+            terms.append(entity)
     return tuple(dict.fromkeys(term for term in terms if term))
 
 
@@ -842,9 +929,183 @@ def _column_from_loaded(
         column_name=column.name,
         data_type=column.data_type,
         is_primary_key=column.is_primary_key,
+        is_unique=bool(column.is_unique),
+        description=(column.description or "").strip()[:200] or None,
         match_reason=_reason(match_rank),
         relevance_score=_score(match_rank),
     )
+
+
+_COUNT_WORDS_RE = re.compile(
+    r"\b(count|counts|number|numbers|num|how many|total number|no\.?)\b(\s+of)?",
+    re.IGNORECASE,
+)
+_COUNT_CUE_RE = re.compile(
+    r"^\s*(how many|count\b|(total\s+)?(number|no\.?|#)\s+of\b)|\bcounts?\s*$",
+    re.IGNORECASE,
+)
+_GENERIC_ROW_WORDS = frozenset({"", "record", "records", "row", "rows", "entry", "entries"})
+_COUNT_AGGREGATIONS = {AggregationType.COUNT, AggregationType.COUNT_DISTINCT}
+_MEASURE_AGGREGATIONS = {AggregationType.SUM, AggregationType.AVG}
+
+
+def _apply_glossary(
+    work: list[_ConceptWork], glossary: list[GlossaryEntry]
+) -> tuple[list[_ConceptWork], dict[str, GlossaryEntry]]:
+    """Point glossary-defined concepts at their declared catalog column."""
+    if not glossary:
+        return work, {}
+    hits: dict[str, GlossaryEntry] = {}
+    updated: list[_ConceptWork] = []
+    for item in work:
+        entry = (
+            match_glossary(glossary, item.requested)
+            if item.kind != "subject" and item.column_name is None
+            else None
+        )
+        if entry is None:
+            updated.append(item)
+            continue
+        hits[f"{item.kind}:{item.requested}"] = entry
+        if not entry.column:
+            updated.append(item)
+            continue
+        parts = entry.column.split(".")
+        schema_name = parts[-3] if len(parts) == 3 else None
+        table_name = parts[-2] if len(parts) >= 2 else None
+        updated.append(
+            _ConceptWork(
+                kind=item.kind,
+                requested=item.requested,
+                terms=(parts[-1],),
+                schema_name=schema_name,
+                table_name=table_name,
+                column_name=parts[-1] if table_name else None,
+            )
+        )
+    return updated, hits
+
+
+def _relevant_glossary(
+    glossary: list[GlossaryEntry],
+    hits: dict[str, GlossaryEntry],
+    message: str | None,
+) -> list[str]:
+    chosen = list(dict.fromkeys(id(entry) for entry in hits.values()))
+    by_id = {id(entry): entry for entry in glossary}
+    lowered = f" {normalize_concept(message or '')} "
+    for entry in glossary:
+        if id(entry) in chosen:
+            continue
+        if any(
+            f" {variant} " in lowered
+            for name in (entry.term, *entry.synonyms)
+            for variant in concept_variants(name)
+        ):
+            chosen.append(id(entry))
+    return [by_id[key].describe() for key in chosen[:10] if key in by_id]
+
+
+def _refine_metric(
+    item: ConceptColumnResolution,
+    *,
+    aggregation: AggregationType,
+    glossary_entry: GlossaryEntry | None,
+    tables: list[MetadataTableCandidate],
+    columns: list[MetadataColumnCandidate],
+) -> ConceptColumnResolution:
+    """Schema-aware metric mapping: counts, numeric measures, glossary notes."""
+    if glossary_entry is not None and glossary_entry.aggregation is not None:
+        aggregation = glossary_entry.aggregation
+    note = (
+        f"glossary: {glossary_entry.describe()}"
+        if glossary_entry is not None and item.resolved
+        else None
+    )
+    normalized = normalize_concept(item.requested)
+    counting = aggregation in _COUNT_AGGREGATIONS or bool(
+        _COUNT_CUE_RE.search(item.requested) or _COUNT_CUE_RE.search(normalized)
+    ) or bool(re.search(r"\bdistinct\b", item.requested, flags=re.IGNORECASE))
+    if counting:
+        return _resolve_count(item, note=note, tables=tables, columns=columns)
+    if aggregation in _MEASURE_AGGREGATIONS and item.candidates:
+        numeric = [c for c in item.candidates if is_numeric_type(c.data_type)]
+        if not numeric:
+            # SUM/AVG over a text/date column would be a silent substitution.
+            return ConceptColumnResolution(requested=item.requested, resolved=False)
+        item = item.model_copy(
+            update={"candidates": numeric, "ambiguous": item.ambiguous and len(numeric) > 1}
+        )
+    return item.model_copy(update={"resolution_note": note}) if note else item
+
+
+def _resolve_count(
+    item: ConceptColumnResolution,
+    *,
+    note: str | None,
+    tables: list[MetadataTableCandidate],
+    columns: list[MetadataColumnCandidate],
+) -> ConceptColumnResolution:
+    # Underscore / measure noise ("products sold", "sales_count") before entity match.
+    cleaned = _MEASURE_NOISE_RE.sub(" ", normalize_concept(item.requested))
+    cleaned = re.sub(r"\bdistinct\b", " ", cleaned, flags=re.IGNORECASE)
+    entity = normalize_concept(_COUNT_WORDS_RE.sub(" ", cleaned))
+    wanted = concept_variants(entity) if entity else set()
+    best = item.candidates[0] if item.resolved and item.candidates else None
+    exact_column = best is not None and (
+        best.match_reason is MetadataMatchReason.EXACT or is_identifier_column(best)
+    )
+    table = None
+    if not exact_column:
+        table = next(
+            (t for t in tables if wanted and concept_variants(t.table_name) & wanted),
+            None,
+        )
+        if table is None and best is None and entity in _GENERIC_ROW_WORDS and len(tables) == 1:
+            table = tables[0]
+    if best is not None and table is None:
+        ref = f"{best.schema_name}.{best.table_name}.{best.column_name}"
+        if best.is_primary_key:
+            detail = f"COUNT(*) of {best.schema_name}.{best.table_name} rows"
+        elif is_identifier_column(best):
+            detail = f"COUNT(DISTINCT {ref})"
+        elif is_numeric_type(best.data_type):
+            detail = (
+                f"{ref} is a numeric per-row measure: SUM it for a total count; "
+                "use COUNT(*) only when counting rows"
+            )
+        else:
+            detail = f"COUNT(DISTINCT {ref})"
+        return item.model_copy(update={"resolution_note": note or detail})
+    activity_cue = bool(
+        _MEASURE_NOISE_RE.search(item.requested)
+        or _MEASURE_NOISE_RE.search(normalize_concept(item.requested))
+        or re.search(r"\bdistinct\b", item.requested, flags=re.IGNORECASE)
+    )
+    id_names = {f"{variant}_id" for variant in wanted} | {f"{variant}id" for variant in wanted}
+    id_column = next(
+        (c for c in columns if c.column_name.lower() in id_names),
+        None,
+    )
+    # "products sold" / "distinct products" → COUNT DISTINCT product_id, not catalog row count.
+    if id_column is not None and (table is None or activity_cue):
+        ref = f"{id_column.schema_name}.{id_column.table_name}.{id_column.column_name}"
+        return ConceptColumnResolution(
+            requested=item.requested,
+            resolved=True,
+            candidates=[id_column],
+            resolution_note=note or f"COUNT(DISTINCT {ref})",
+        )
+    if table is not None:
+        pk_ids = {pk.column_id for pk in table.primary_key_columns}
+        pk_columns = [c for c in columns if c.column_id in pk_ids]
+        return ConceptColumnResolution(
+            requested=item.requested,
+            resolved=True,
+            candidates=pk_columns[:1],
+            resolution_note=note or f"COUNT(*) of {table.schema_name}.{table.table_name} rows",
+        )
+    return item
 
 
 def _column_resolution(

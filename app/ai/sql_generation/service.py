@@ -23,10 +23,8 @@ from app.ai.sql_generation.generation import generate_sql
 from app.ai.sql_generation.logging_helpers import generation_log_context
 from app.ai.sql_generation.models import SQLGenerateParams, SQLGenerationResult
 from app.ai.sql_generation.prompts import build_sql_generation_prompt_registry
-from app.ai.sql_generation.schema_context import (
-    build_schema_prompt_context,
-    has_usable_schema,
-)
+from app.ai.sql_generation.schema_cache import cached_schema_prompt_context
+from app.ai.sql_generation.schema_context import has_usable_schema
 from app.ai.state import AgentStateService
 from app.core.authorization import is_super_admin, workspace_role_has_permission
 from app.db.models import DataSource, User, Workspace, WorkspaceMember
@@ -59,7 +57,8 @@ class SQLGenerationService:
         if llm_client is not None:
             self._llm_client = llm_client
         else:
-            config = llm_config or llm_client_config_from_settings()
+            # Intent-like drafting uses the fast/cheap model when configured.
+            config = llm_config or llm_client_config_from_settings(fast=True)
             if not config.api_key:
                 raise SQLGenerationConfigurationError("LLM API key is not configured")
             self._llm_client = AsyncLLMClient(config)
@@ -79,7 +78,7 @@ class SQLGenerationService:
                 "Schema context is required for SQL generation"
             )
 
-        schema = build_schema_prompt_context(params.metadata)
+        schema = cached_schema_prompt_context(params.metadata)
         outcome = await generate_sql(
             client=self._llm_client,
             registry=self._prompt_registry,

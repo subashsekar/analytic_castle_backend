@@ -1,6 +1,9 @@
+import asyncio
+import json
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.ai.context import MetadataSearchContextProvider, build_ai_context
@@ -18,7 +21,7 @@ from app.ai.metadata_resolver import MetadataContextResolver
 from app.ai.metadata_types import empty_resolved_context
 from app.ai.orchestrator import AIAnalystOrchestrator
 from app.ai.providers import LLMProvider, create_llm_provider
-from app.ai.types import AIRequest, TokenUsage
+from app.ai.types import AIRequest, AIResponse, TokenUsage
 from app.api.deps import (
     get_current_user,
     load_workspace_access,
@@ -76,12 +79,38 @@ def require_llm_provider(
 ) -> LLMProvider:
     del current_user
     try:
-        return create_llm_provider()
+        # Intent/planner/supervisor use the fast model when LLM_FAST_MODEL is set.
+        return create_llm_provider(fast=True)
     except AIConfigurationError:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=PROVIDER_NOT_CONFIGURED_DETAIL,
         ) from None
+
+
+def _chat_response(result: AIResponse, data_source_id: object) -> AIChatResponse:
+    if result.intent is None or result.plan is None:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=INVALID_RESPONSE_DETAIL,
+        )
+    return AIChatResponse(
+        request_id=result.request_id,
+        response=result.response,
+        model=result.model,
+        usage=_usage_response(result.usage),
+        intent=intent_response(result.intent),
+        plan=plan_response(result.plan),
+        metadata_context=result.metadata_context
+        or empty_resolved_context(data_source_id),  # type: ignore[arg-type]
+        conversation_id=result.conversation_id,
+        conversation_version=result.conversation_version,
+        analysis=phase8_analysis_response(result.phase8_analysis),
+    )
+
+
+def _sse(event: str, data: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
 
 def _authorize_data_source(
@@ -211,21 +240,113 @@ async def chat(
             detail=PROVIDER_UNAVAILABLE_DETAIL,
         ) from None
 
-    if result.intent is None or result.plan is None:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=INVALID_RESPONSE_DETAIL,
-        )
-    return AIChatResponse(
-        request_id=result.request_id,
-        response=result.response,
-        model=result.model,
-        usage=_usage_response(result.usage),
-        intent=intent_response(result.intent),
-        plan=plan_response(result.plan),
-        metadata_context=result.metadata_context
-        or empty_resolved_context(payload.data_source_id),
-        conversation_id=result.conversation_id,
-        conversation_version=result.conversation_version,
-        analysis=phase8_analysis_response(result.phase8_analysis),
+    return _chat_response(result, payload.data_source_id)
+
+
+@router.post(
+    "/chat/stream",
+    summary="Stream an AI analyst chat response",
+    description=(
+        "Same authorization and pipeline as /chat, but emits Server-Sent Events so "
+        "clients can show measured query facts before Phase 8 agents finish. "
+        "Events: partial, final, error."
+    ),
+    responses={
+        **_AUTH_ERRORS,
+        status.HTTP_400_BAD_REQUEST: {"description": "Invalid AI request"},
+        status.HTTP_404_NOT_FOUND: {"description": "Data source not found"},
+        status.HTTP_429_TOO_MANY_REQUESTS: {"description": "Too many requests"},
+        status.HTTP_503_SERVICE_UNAVAILABLE: {
+            "description": "AI provider is not configured"
+        },
+    },
+    dependencies=[Depends(require_rate_limit("ai-chat"))],
+)
+async def chat_stream(
+    payload: AIChatRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    provider: Annotated[LLMProvider, Depends(require_llm_provider)],
+) -> StreamingResponse:
+    access = _authorize_data_source(db, current_user, payload.data_source_id)
+    context = build_ai_context(access)
+    request_id = get_request_id()
+    if not request_id or request_id == "-":
+        request_id = new_request_id()
+    orchestrator = AIAnalystOrchestrator(
+        provider,
+        metadata=MetadataSearchContextProvider(db),
+        resolver=MetadataContextResolver(db),
+    )
+    queue: asyncio.Queue[tuple[str, dict[str, Any]] | None] = asyncio.Queue()
+
+    async def on_partial(event: dict[str, Any]) -> None:
+        await queue.put(("partial", event))
+
+    async def run() -> None:
+        try:
+            result = await orchestrator.chat(
+                AIRequest(
+                    message=payload.message,
+                    data_source_id=payload.data_source_id,
+                    request_id=request_id,
+                    conversation_id=payload.conversation_id,
+                    conversation_version=payload.conversation_version,
+                ),
+                context,
+                db=db,
+                on_partial=on_partial,
+            )
+            db.commit()
+            response = _chat_response(result, payload.data_source_id)
+            await queue.put(
+                ("final", response.model_dump(mode="json", exclude_none=True))
+            )
+        except AIRequestValidationError as exc:
+            db.rollback()
+            await queue.put(("error", {"detail": str(exc) or INVALID_REQUEST_DETAIL}))
+        except AIContextError:
+            db.rollback()
+            await queue.put(("error", {"detail": "Not authorized"}))
+        except AIConfigurationError:
+            db.rollback()
+            await queue.put(("error", {"detail": PROVIDER_NOT_CONFIGURED_DETAIL}))
+        except AIProviderTimeoutError:
+            db.rollback()
+            await queue.put(("error", {"detail": PROVIDER_TIMEOUT_DETAIL}))
+        except AIProviderRateLimitError:
+            db.rollback()
+            await queue.put(("error", {"detail": PROVIDER_RATE_LIMIT_DETAIL}))
+        except (
+            AIProviderAuthenticationError,
+            AIProviderError,
+            AIResponseValidationError,
+        ):
+            db.rollback()
+            await queue.put(("error", {"detail": PROVIDER_UNAVAILABLE_DETAIL}))
+        except Exception:
+            db.rollback()
+            await queue.put(("error", {"detail": PROVIDER_UNAVAILABLE_DETAIL}))
+        finally:
+            await queue.put(None)
+
+    async def events():
+        task = asyncio.create_task(run())
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                event, data = item
+                yield _sse(event, data)
+        finally:
+            await task
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
     )

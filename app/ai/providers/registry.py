@@ -11,9 +11,11 @@ from app.ai.providers.openai_compatible import OpenAICompatibleProvider
 
 def create_llm_provider(
     config: LLMProviderConfig | None = None,
+    *,
+    fast: bool = False,
 ) -> LLMProvider:
     """Select and initialize the configured LLM provider."""
-    resolved = config or llm_provider_config_from_settings()
+    resolved = config or llm_provider_config_from_settings(fast=fast)
     validate_llm_provider_config(resolved)
     return OpenAICompatibleProvider(resolved)
 

@@ -49,8 +49,8 @@ class LLMClientConfig:
         )
 
 
-def llm_client_config_from_settings() -> LLMClientConfig:
-    resolved = resolve_llm_settings()
+def llm_client_config_from_settings(*, fast: bool = False) -> LLMClientConfig:
+    resolved = resolve_llm_settings(fast=fast)
     return LLMClientConfig(
         api_key=resolved.api_key,
         base_url=resolved.base_url,

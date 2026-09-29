@@ -17,6 +17,7 @@ from app.ai.intent_types import (
     AIRequestPlan,
     validate_concept_name,
 )
+from app.ai.investigation.models import InvestigationPlanStep
 from app.ai.state.models import AnalysisSessionSnapshot
 
 _MAX_LLM_COLLECTION = 50
@@ -204,6 +205,7 @@ class AnalysisPlan(BaseModel):
     detected_intent: AIIntentType
     required_data: list[RequiredDataRef] = Field(default_factory=list)
     action_steps: list[PlannerActionStep] = Field(default_factory=list)
+    investigation_steps: list[InvestigationPlanStep] = Field(default_factory=list)
     missing_information: list[str] = Field(default_factory=list)
     plan_version: str
 

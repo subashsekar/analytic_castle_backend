@@ -71,10 +71,11 @@ def build_schema_prompt_context(
             lines.append(f"- {table.schema_name}.{table.table_name} (pk={pk})")
         lines.append("Columns:")
         for column in columns:
-            pk_flag = " pk" if column.is_primary_key else ""
+            pk_flag = " pk" if column.is_primary_key else (" unique" if column.is_unique else "")
+            description = f" - {column.description}" if column.description else ""
             lines.append(
                 f"- {column.schema_name}.{column.table_name}.{column.column_name}"
-                f" ({column.data_type}{pk_flag})"
+                f" ({column.data_type}{pk_flag}){description}"
             )
         if relationships:
             lines.append("Relationships:")
@@ -85,6 +86,17 @@ def build_schema_prompt_context(
                     f" ({rel.relationship_type.value})"
                 )
 
+    if metadata.glossary:
+        lines.append("Business glossary (data-source definitions; authoritative):")
+        lines.extend(f"- {entry}" for entry in metadata.glossary[:10])
+    notes = [
+        f"- {item.requested}: {item.resolution_note}"
+        for item in metadata.resolved_metrics
+        if item.resolution_note
+    ]
+    if notes:
+        lines.append("Metric resolution:")
+        lines.extend(notes[:10])
     if metadata.unresolved_concepts:
         unresolved = ", ".join(metadata.unresolved_concepts[:20])
         lines.append(f"Unresolved concepts: {unresolved}")

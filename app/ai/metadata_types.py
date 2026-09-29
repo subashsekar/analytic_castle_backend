@@ -49,6 +49,8 @@ class MetadataColumnCandidate(BaseModel):
     column_name: str
     data_type: str
     is_primary_key: bool = False
+    is_unique: bool = False
+    description: str | None = None
     match_reason: MetadataMatchReason
     relevance_score: int
 
@@ -78,6 +80,9 @@ class ConceptColumnResolution(BaseModel):
     resolved: bool
     ambiguous: bool = False
     candidates: list[MetadataColumnCandidate] = Field(default_factory=list)
+    # How the concept maps when it is not a single column value, e.g.
+    # "COUNT(*) of public.sales rows" or "glossary: SUM of public.sales.revenue".
+    resolution_note: str | None = None
 
 
 class ResolvedMetadataContext(BaseModel):
@@ -92,8 +97,32 @@ class ResolvedMetadataContext(BaseModel):
     resolved_filters: list[ConceptColumnResolution] = Field(default_factory=list)
     resolved_time_columns: list[MetadataColumnCandidate] = Field(default_factory=list)
     unresolved_concepts: list[str] = Field(default_factory=list)
+    glossary: list[str] = Field(default_factory=list)
     requires_clarification: bool = False
     clarification_question: str | None = None
+
+
+_NUMERIC_TYPE_MARKERS = (
+    "int",
+    "numeric",
+    "decimal",
+    "float",
+    "double",
+    "real",
+    "money",
+    "number",
+    "serial",
+)
+
+
+def is_numeric_type(data_type: str) -> bool:
+    lowered = data_type.lower()
+    return any(marker in lowered for marker in _NUMERIC_TYPE_MARKERS) and "interval" not in lowered
+
+
+def is_identifier_column(column: MetadataColumnCandidate) -> bool:
+    name = column.column_name.lower()
+    return column.is_primary_key or name == "id" or name.endswith("_id")
 
 
 def empty_resolved_context(data_source_id: UUID) -> ResolvedMetadataContext:

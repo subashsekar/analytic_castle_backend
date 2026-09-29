@@ -508,6 +508,8 @@ def test_pipeline_partial_phase8_skips(
     answer = pipeline_mod._compose_answer(payload, exec_result)
     assert "10" in answer
     assert "Analysis: One month of revenue is 10." in answer
+    assert payload.chart_hint == "kpi"  # single period → KPI, not a trend line
+    assert "Chart hint: kpi." in answer
 
 
 def _force_llm_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -560,8 +562,10 @@ def test_simple_aggregation_uses_no_llm_agents(
         )
     )
     answer = pipeline_mod._compose_answer(payload, result)
-    assert answer.startswith("total revenue: 187,650")
+    assert "total revenue: 187,650" in answer
     assert payload.question_types == ["AGGREGATE"]
+    assert payload.chart_hint == "kpi"
+    assert "Chart hint: kpi." in answer
 
 
 def test_diagnostic_runs_agents_concurrently_and_separates_hypotheses(
@@ -639,9 +643,80 @@ def test_diagnostic_runs_agents_concurrently_and_separates_hypotheses(
     assert elapsed < 0.75, "trend and anomaly should run concurrently"
     assert data_analyst.call_count == 0
     answer = pipeline_mod._compose_answer(payload, result)
-    assert answer.startswith("revenue for Mar 2025 was 6,000, down 5,000")
+    assert "revenue for Mar 2025 was 6,000, down 5,000" in answer
     assert "Largest contributors by region" in answer
     assert "Likely causes (hypotheses, not confirmed facts):" in answer
     assert "North sales collapsed in March." in answer
     assert "Insight generation was unavailable" in answer
     assert "DIAGNOSTIC" in (payload.question_types or [])
+    assert payload.chart_hint == "line"
+    assert "Chart hint: line." in answer
+
+
+def test_compose_answer_grounds_claims_and_includes_evidence_context() -> None:
+    from datetime import date
+
+    from app.ai import analysis_pipeline as pipeline_mod
+    from app.ai.analysis_profile import AnalysisProfile, QuestionKind
+    from app.ai.intent_types import AIMetric, AITimeRange, AggregationType, TimeRangePreset
+    from app.ai.result_facts import build_result_facts
+
+    result = SQLExecutionResult(
+        status=SQLExecutionStatus.SUCCEEDED,
+        columns=["region", "revenue"],
+        rows=[["North", 1200], ["South", 800]],
+        row_count=2,
+    )
+    facts = build_result_facts(result, message="top regions by revenue")
+    intent = AIIntent(
+        intent=AIIntentType.RANKING,
+        subject="revenue by region",
+        metrics=[AIMetric(name="revenue", aggregation=AggregationType.SUM)],
+        time_range=AITimeRange(
+            preset=TimeRangePreset.CUSTOM_RANGE,
+            start_date=date(2025, 1, 1),
+            end_date=date(2025, 3, 31),
+        ),
+        confidence=AIConfidence.HIGH,
+        requires_data_access=True,
+    )
+    profile = AnalysisProfile(kinds=frozenset({QuestionKind.COMPARISON}))
+    payload = AnalysisPayload(
+        sql="SELECT region, SUM(revenue) AS revenue FROM sales GROUP BY 1",
+        data_analyst={
+            "summary": "North leads at 1,200. Invented growth was 9999 overnight.",
+        },
+        recommendation={
+            "recommendations": [
+                {
+                    "title": "Focus North",
+                    "recommendation": "Double down on North where revenue is 1,200.",
+                },
+                {
+                    "title": "Hallucinated",
+                    "recommendation": "Cut spend by 424242 immediately.",
+                },
+            ]
+        },
+        question_understood=pipeline_mod._question_understood(
+            "top regions by revenue", intent, profile
+        ),
+        date_range=pipeline_mod._date_range_label(intent),
+        assumptions=["Used the latest complete quarter present in the data."],
+        chart_hint=pipeline_mod._chart_hint(facts),
+        facts=[line for line in [facts.headline, *facts.lines] if line],
+    )
+    answer = pipeline_mod._compose_answer(payload, result, facts=facts)
+    assert "Question understood:" in answer
+    assert "Date range: 2025-01-01 to 2025-03-31" in answer
+    assert "SQL: SELECT region, SUM(revenue) AS revenue FROM sales GROUP BY 1" in answer
+    assert "Assumptions: Used the latest complete quarter present in the data." in answer
+    assert "Measured from the query results:" in answer
+    assert "Analysis: North leads at 1,200." in answer
+    assert "9999" not in answer
+    assert "Recommendations:" in answer
+    assert "1,200" in answer
+    assert "424242" not in answer
+    assert "Likely causes" not in answer  # no hypotheses in this payload
+    assert payload.chart_hint == "bar"
+    assert "Chart hint: bar." in answer

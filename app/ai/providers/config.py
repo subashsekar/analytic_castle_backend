@@ -28,8 +28,8 @@ class LLMProviderConfig:
         )
 
 
-def llm_provider_config_from_settings() -> LLMProviderConfig:
-    resolved = resolve_llm_settings()
+def llm_provider_config_from_settings(*, fast: bool = False) -> LLMProviderConfig:
+    resolved = resolve_llm_settings(fast=fast)
     return LLMProviderConfig(
         provider=resolved.provider,
         api_key=resolved.api_key,

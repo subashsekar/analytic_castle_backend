@@ -40,9 +40,9 @@ from app.ai.sql_correction.validation import (
 )
 from app.ai.sql_generation.errors import SQLGenerationValidationError
 from app.ai.sql_generation.models import LLMSQLOutput, SQLGenerationOutcome
+from app.ai.sql_generation.schema_cache import cached_schema_prompt_context
 from app.ai.sql_generation.schema_context import (
     SchemaPromptContext,
-    build_schema_prompt_context,
     has_usable_schema,
 )
 from app.ai.sql_validation.models import SQLValidationViolation
@@ -72,7 +72,7 @@ async def correct_sql(
     if not has_usable_schema(metadata):
         raise SQLCorrectionSchemaError("Schema context is required for SQL correction")
 
-    schema = schema_context or build_schema_prompt_context(metadata)
+    schema = schema_context or cached_schema_prompt_context(metadata)
     if not schema.text.strip() or schema.table_count + schema.column_count == 0:
         raise SQLCorrectionSchemaError("Schema context is required for SQL correction")
 

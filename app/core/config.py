@@ -173,6 +173,8 @@ class Settings(BaseSettings):
     LLM_API_KEY: str = Field(default="", repr=False)
     LLM_BASE_URL: str = ""
     LLM_MODEL: str = "gpt-4o-mini"
+    # Optional cheaper/faster model for intent + SQL drafting. Empty → LLM_MODEL.
+    LLM_FAST_MODEL: str = ""
     LLM_TIMEOUT_SECONDS: float = Field(default=30.0, gt=0, le=120)
     LLM_TEMPERATURE: float = Field(default=0.2, ge=0, le=2)
     LLM_MAX_OUTPUT_TOKENS: int = Field(default=4_096, ge=1, le=8_192)
@@ -205,7 +207,8 @@ class Settings(BaseSettings):
     AI_SQL_MAX_EXPLANATION_CHARS: int = Field(default=1_000, ge=32, le=4_000)
     AI_SQL_MAX_ASSUMPTIONS: int = Field(default=20, ge=1, le=50)
     AI_SQL_VALIDATION_DEFAULT_SCHEMA: str = Field(default="public", min_length=1, max_length=63)
-    AI_SQL_CORRECTION_MAX_ATTEMPTS: int = Field(default=2, ge=1, le=5)
+    # One correction round by default; complex diagnostics may still use this cap.
+    AI_SQL_CORRECTION_MAX_ATTEMPTS: int = Field(default=1, ge=1, le=5)
     AI_SQL_CORRECTION_MAX_FEEDBACK_CHARS: int = Field(default=2_000, ge=64, le=8_000)
     # Chat Phase 8. Independent agents run concurrently, so the budget is the
     # wall-clock cap for all agents together; the chat request also spends time
@@ -215,7 +218,9 @@ class Settings(BaseSettings):
     AI_CHAT_PHASE8_AGENT_TIMEOUT_SECONDS: float = Field(default=30.0, gt=1, le=120)
     # Root cause makes several LLM calls (hypotheses, evidence SQL, re-rank).
     AI_CHAT_PHASE8_RCA_TIMEOUT_SECONDS: float = Field(default=55.0, gt=1, le=240)
-    AI_CHAT_PHASE8_RCA_MAX_INVESTIGATION_QUERIES: int = Field(default=1, ge=0, le=5)
+    AI_CHAT_PHASE8_RCA_MAX_INVESTIGATION_QUERIES: int = Field(default=3, ge=0, le=5)
+    # Schema-grounded diagnostic queries (change, breakdowns, YoY/funnel/cohort) before RCA LLM follow-ups.
+    AI_INVESTIGATION_MAX_QUERIES: int = Field(default=4, ge=0, le=5)
     AI_CHAT_PHASE8_MAX_TOKENS: int = Field(default=1_200, ge=256, le=4_096)
     AI_CHAT_PHASE8_PROMPT_ROWS: int = Field(default=20, ge=1, le=100)
     # Deterministic catalog-only query used when LLM SQL cannot be validated.
@@ -250,6 +255,7 @@ class Settings(BaseSettings):
         "LLM_API_KEY",
         "LLM_BASE_URL",
         "LLM_MODEL",
+        "LLM_FAST_MODEL",
         "OPENROUTER_API_KEY",
         "OPENROUTER_BASE_URL",
         mode="before",

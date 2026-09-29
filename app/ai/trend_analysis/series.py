@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any
 
@@ -41,7 +41,10 @@ _EXTRA_FORMATS = ("%Y-%m", "%Y/%m", "%b %Y", "%B %Y", "%d-%m-%Y", "%m/%d/%Y")
 def _drop_tz(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value
-    return value.astimezone(timezone.utc).replace(tzinfo=None)
+    # date_trunc periods are calendar labels (month/week start), not absolute
+    # instants. Converting to UTC shifts the calendar day near timezone edges
+    # (e.g. 2025-02-01T00:00+05:30 → 2025-01-31) and mislabels Feb/Mar.
+    return value.replace(tzinfo=None)
 
 
 def parse_period(value: Any) -> datetime | None:

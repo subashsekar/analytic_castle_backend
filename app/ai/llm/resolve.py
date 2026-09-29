@@ -26,7 +26,7 @@ class ResolvedLLMSettings:
     retry_max_backoff: float
 
 
-def resolve_llm_settings() -> ResolvedLLMSettings:
+def resolve_llm_settings(*, fast: bool = False) -> ResolvedLLMSettings:
     """Resolve a single LLM config used by all AI layers.
 
     Precedence:
@@ -36,9 +36,12 @@ def resolve_llm_settings() -> ResolvedLLMSettings:
     - For ``openai``: ``LLM_API_KEY``; ``LLM_BASE_URL`` then OpenAI default.
       OpenRouter URL defaults are ignored unless ``LLM_PROVIDER=openrouter``.
     - For ``openai_compatible``: ``LLM_API_KEY`` and required ``LLM_BASE_URL``.
+    - ``fast=True`` uses ``LLM_FAST_MODEL`` when set, otherwise ``LLM_MODEL``.
     """
     provider = settings.LLM_PROVIDER.strip().lower()
-    model = settings.LLM_MODEL.strip()
+    default_model = settings.LLM_MODEL.strip()
+    fast_model = settings.LLM_FAST_MODEL.strip()
+    model = (fast_model or default_model) if fast else default_model
     legacy_key = settings.LLM_API_KEY.strip()
     legacy_url = settings.LLM_BASE_URL.strip().rstrip("/")
     openrouter_key = settings.OPENROUTER_API_KEY.strip()

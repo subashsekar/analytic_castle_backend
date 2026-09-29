@@ -159,6 +159,11 @@ class AIPhase8AnalysisResponse(BaseModel):
     question_types: list[str] | None = None
     facts: list[str] | None = None
     notes: list[str] | None = None
+    chart_hint: str | None = None
+    question_understood: str | None = None
+    date_range: str | None = None
+    assumptions: list[str] | None = None
+    performance: dict[str, Any] | None = None
 
 
 class AIChatResponse(BaseModel):
@@ -274,4 +279,9 @@ def phase8_analysis_response(payload: object | None) -> AIPhase8AnalysisResponse
         question_types=payload.question_types,
         facts=payload.facts,
         notes=payload.notes,
+        chart_hint=payload.chart_hint,
+        question_understood=payload.question_understood,
+        date_range=payload.date_range,
+        assumptions=payload.assumptions,
+        performance=payload.performance,
     )

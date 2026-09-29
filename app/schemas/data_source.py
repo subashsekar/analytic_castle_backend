@@ -4,6 +4,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.ai.glossary import MAX_GLOSSARY_ENTRIES, GlossaryEntry
 from app.connectors.postgresql import ALLOWED_SSL_MODES
 from app.enums import DataSourceStatus, DataSourceType
 
@@ -70,6 +71,14 @@ class DataSourceUpdate(BaseModel):
     @classmethod
     def strip_name(cls, value: Any) -> Any:
         return _strip_text(value)
+
+
+class DataSourceGlossary(BaseModel):
+    """Business glossary: metric synonyms/definitions used by the AI analyst."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    entries: list[GlossaryEntry] = Field(default_factory=list, max_length=MAX_GLOSSARY_ENTRIES)
 
 
 class DataSourceRead(BaseModel):

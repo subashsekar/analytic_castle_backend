@@ -31,10 +31,8 @@ from app.ai.sql_correction.models import (
 from app.ai.sql_correction.validation import resolve_max_attempts, sql_is_unchanged
 from app.ai.sql_execution.execution import execute_validated_sql
 from app.ai.sql_execution.models import SQLExecutionResult
-from app.ai.sql_generation.schema_context import (
-    build_schema_prompt_context,
-    has_usable_schema,
-)
+from app.ai.sql_generation.schema_cache import cached_schema_prompt_context
+from app.ai.sql_generation.schema_context import has_usable_schema
 from app.ai.sql_validation.validation import validate_generated_sql
 from app.mcp import MCPClient
 
@@ -76,7 +74,7 @@ async def correct_failed_sql(
         )
         return outcome
 
-    schema = build_schema_prompt_context(params.metadata)
+    schema = cached_schema_prompt_context(params.metadata)
     current_sql = params.sql
     current_violations = list(params.violations)
     current_exec_code = params.execution_error_code

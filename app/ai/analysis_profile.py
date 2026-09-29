@@ -290,11 +290,13 @@ def _concept_mappings(metadata: ResolvedMetadataContext) -> list[str]:
         ("filter", metadata.resolved_filters),
     ):
         for item in group[:10]:
-            if not item.candidates:
+            if not item.candidates and not item.resolution_note:
                 continue
             targets = ", ".join(
                 f"{c.schema_name}.{c.table_name}.{c.column_name}" for c in item.candidates[:3]
             )
+            if item.resolution_note:
+                targets = f"{targets} [{item.resolution_note}]" if targets else item.resolution_note
             flag = " (ambiguous)" if item.ambiguous else ""
             out.append(f"{label} '{item.requested}' -> {targets}{flag}")
     return out

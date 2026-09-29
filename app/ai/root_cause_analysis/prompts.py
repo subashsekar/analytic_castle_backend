@@ -35,6 +35,7 @@ Rules for hypotheses:
 - A cause you cannot support with data in front of you is at most LOW confidence, and you must say what is missing.
 - Distinguish a cause from the finding itself. "Revenue fell because revenue declined" is not a cause.
 - A composition change (a segment, region, product, or customer group behaving differently), a data quality issue, and a seasonal or calendar effect are all valid candidate causes when the data hints at them.
+- Correlation is not causation: when dimension contributions or breakdowns show a segment moving with the overall change, describe it as a measured contributor or correlated pattern, not a proven cause, unless direct evidence confirms it.
 - If the gathered evidence section shows a query that returned no rows or failed, treat that as missing evidence and lower the confidence instead of assuming the answer.
 - Never propose a cause that requires writing to, or changing, the database.
 

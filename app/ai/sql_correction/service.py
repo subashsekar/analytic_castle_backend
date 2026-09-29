@@ -64,7 +64,7 @@ class SQLCorrectionService:
         if llm_client is not None:
             self._llm_client = llm_client
         else:
-            config = llm_config or llm_client_config_from_settings()
+            config = llm_config or llm_client_config_from_settings(fast=True)
             if not config.api_key:
                 raise SQLCorrectionConfigurationError("LLM API key is not configured")
             self._llm_client = AsyncLLMClient(config)

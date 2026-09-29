@@ -2,7 +2,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import CheckConstraint, DateTime, Enum, ForeignKey, String, func
+from sqlalchemy import JSON, CheckConstraint, DateTime, Enum, ForeignKey, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 from app.db.session import Base
@@ -62,6 +62,13 @@ class DataSource(Base):
     last_tested_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
+    )
+    # Business glossary entries (see app.ai.glossary). Deferred: only the AI
+    # resolver and glossary endpoints load it.
+    business_glossary: Mapped[list | None] = mapped_column(
+        JSON,
+        nullable=True,
+        deferred=True,
     )
 
     workspace: Mapped["Workspace"] = relationship(back_populates="data_sources")

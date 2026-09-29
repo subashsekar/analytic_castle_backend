@@ -180,17 +180,44 @@ def _time_facts(
     per_period: dict[datetime, float] = {}
     labels: dict[datetime, str] = {}
     per_cat: dict[datetime, dict[str, float]] = {}
+    rollups: dict[datetime, float] = {}
     for row in rows:
         period = parse_period(row[period_idx])
         value = parse_number(row[metric])
         if period is None or value is None:
             continue
-        per_period[period] = per_period.get(period, 0.0) + value
         labels.setdefault(period, _period_text(row[period_idx], period))
-        if category is not None:
-            key = _fmt_cell(row[category])
-            bucket = per_cat.setdefault(period, {})
-            bucket[key] = bucket.get(key, 0.0) + value
+        if category is None:
+            per_period[period] = per_period.get(period, 0.0) + value
+            continue
+        raw_cat = row[category]
+        if raw_cat is None or (isinstance(raw_cat, str) and not str(raw_cat).strip()):
+            rollups[period] = value
+            continue
+        key = _fmt_cell(raw_cat)
+        bucket = per_cat.setdefault(period, {})
+        bucket[key] = bucket.get(key, 0.0) + value
+
+    if category is not None:
+        preferred = _preferred_overall_category(per_cat)
+        if rollups:
+            per_period = dict(rollups)
+        elif preferred is not None:
+            per_period = {
+                period: cats[preferred]
+                for period, cats in per_cat.items()
+                if preferred in cats
+            }
+        else:
+            # Dimension breakdown (e.g. region×month): cite cell-level movers only.
+            # Summing regions into a period total invents a number that is not a
+            # result cell and fails evidence grounding.
+            return _category_change_facts(
+                columns, per_cat, labels, metric, category, message, notes
+            )
+    else:
+        preferred = None
+
     if not per_period:
         return ResultFacts(shape="table", lines=[_row_preview(columns, rows)], notes=notes)
 
@@ -207,8 +234,6 @@ def _time_facts(
     if len(periods) == 1:
         only = periods[0]
         headline = f"{metric_label} for {labels[only]} was {_fmt_num(per_period[only])}."
-        if category is not None:
-            lines.extend(_category_split(per_cat.get(only, {}), columns[category], metric_label))
         notes = notes + ["Only one period is present, so no period-over-period change can be measured."]
         return ResultFacts(shape="time_series", headline=headline, lines=lines, notes=notes)
 
@@ -249,7 +274,24 @@ def _time_facts(
         + (f"; total across periods {_fmt_num(sum(per_period.values()))}" if additive else "")
         + "."
     )
-    if category is not None and previous is not None:
+    if category is not None and previous is not None and (rollups or preferred is not None):
+        # Multi-section / rollup query: contributor lines only when we also have
+        # per-category leaf rows beyond the chosen overall grain.
+        leaf = {
+            period: {k: v for k, v in cats.items() if preferred is None or k != preferred}
+            for period, cats in per_cat.items()
+        }
+        if any(leaf.values()):
+            lines.extend(
+                _contributors(
+                    leaf.get(previous, {}),
+                    leaf.get(target, {}),
+                    category_label=_label(columns[category]),
+                    previous_label=labels[previous],
+                    target_label=labels[target],
+                )
+            )
+    elif category is not None and previous is not None:
         lines.extend(
             _contributors(
                 per_cat.get(previous, {}),
@@ -261,6 +303,99 @@ def _time_facts(
         )
     elif category is not None:
         lines.extend(_category_split(per_cat.get(target, {}), columns[category], metric_label))
+    return ResultFacts(shape="time_series", headline=headline, lines=lines, notes=notes)
+
+
+_OVERALL_CATEGORY_NAMES = frozenset(
+    {
+        "overall",
+        "total",
+        "all",
+        "summary",
+        "monthly_comparison",
+        "overall_change",
+        "period_total",
+        "grand_total",
+    }
+)
+
+
+def _preferred_overall_category(per_cat: dict[datetime, dict[str, float]]) -> str | None:
+    names: set[str] = set()
+    for cats in per_cat.values():
+        names.update(cats)
+    by_key = {name.lower().replace(" ", "_"): name for name in names}
+    for candidate in _OVERALL_CATEGORY_NAMES:
+        if candidate in by_key:
+            return by_key[candidate]
+    return None
+
+
+def _category_change_facts(
+    columns: list[str],
+    per_cat: dict[datetime, dict[str, float]],
+    labels: dict[datetime, str],
+    metric: int,
+    category: int,
+    message: str,
+    notes: list[str],
+) -> ResultFacts:
+    """Period×dimension facts using only cell-level values (no invented totals)."""
+    periods = sorted(per_cat)
+    metric_label = _label(columns[metric])
+    cat_label = _label(columns[category])
+    if len(periods) < 2:
+        only = periods[0] if periods else None
+        if only is None:
+            return ResultFacts(shape="table", notes=notes)
+        lines = _category_split(per_cat.get(only, {}), columns[category], metric_label)
+        return ResultFacts(
+            shape="time_series",
+            headline=f"{metric_label} by {cat_label} for {labels[only]}.",
+            lines=lines,
+            notes=notes
+            + ["Only one period is present, so no period-over-period change can be measured."],
+        )
+
+    target = _target_period(message, periods) or periods[-1]
+    index = periods.index(target)
+    previous = periods[index - 1] if index > 0 else periods[0]
+    if previous == target and len(periods) > 1:
+        previous = periods[0] if target != periods[0] else periods[1]
+    before = per_cat.get(previous, {})
+    after = per_cat.get(target, {})
+    keys = set(before) | set(after)
+    deltas = {key: after.get(key, 0.0) - before.get(key, 0.0) for key in keys}
+    if not deltas:
+        return ResultFacts(shape="table", notes=notes)
+    mover, delta = max(deltas.items(), key=lambda item: abs(item[1]))
+    before_value, after_value = before.get(mover, 0.0), after.get(mover, 0.0)
+    headline = (
+        f"Largest {cat_label} mover {labels[previous]} to {labels[target]}: {mover} "
+        f"from {_fmt_num(before_value)} to {_fmt_num(after_value)}, "
+        f"{_direction(delta)} {_fmt_num(abs(delta))}"
+        + (f" ({_fmt_pct(delta / before_value * 100)})" if before_value else "")
+        + "."
+    )
+    lines = [
+        f"{metric_label} by {cat_label} ({labels[previous]} to {labels[target]}): "
+        + ", ".join(
+            f"{key} {_fmt_num(before.get(key, 0.0))} → {_fmt_num(after.get(key, 0.0))}"
+            for key, _ in sorted(deltas.items(), key=lambda item: abs(item[1]), reverse=True)[
+                :_MAX_SERIES_LISTED
+            ]
+        )
+        + ".",
+    ]
+    lines.extend(
+        _contributors(
+            before,
+            after,
+            category_label=cat_label,
+            previous_label=labels[previous],
+            target_label=labels[target],
+        )
+    )
     return ResultFacts(shape="time_series", headline=headline, lines=lines, notes=notes)
 
 

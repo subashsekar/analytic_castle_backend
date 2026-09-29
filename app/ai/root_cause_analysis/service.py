@@ -108,6 +108,8 @@ class RootCauseAnalysisAgent:
         organization_id: UUID | None = None,
         metadata: ResolvedMetadataContext | None = None,
         max_investigation_queries: int = MAX_INVESTIGATION_QUERIES,
+        prefetched_evidence: Sequence[RootCauseEvidence] | None = None,
+        investigation_summary: str | None = None,
         expected_agent_version: int | None = None,
     ) -> RootCauseAnalysisResult:
         # 1. Authorize access
@@ -137,7 +139,12 @@ class RootCauseAnalysisAgent:
             return result
 
         findings = build_findings_payload(trend, anomalies)
+        if investigation_summary:
+            findings = f"{findings}\n\n{investigation_summary}"
         notes: list[str] = []
+
+        prefetched = list(prefetched_evidence or [])
+        prefetched_executed = sum(1 for item in prefetched if item.executed)
 
         # 3. Generate hypotheses from the evidence already in hand
         llm_output = await self._request_hypotheses(
@@ -145,17 +152,20 @@ class RootCauseAnalysisAgent:
             sql=sql,
             query_result=query_result,
             findings=findings,
+            evidence=evidence_prompt_payload(prefetched) if prefetched else None,
         )
 
         # 4. Gather additional evidence when the model asked for it, then re-rank
+        llm_slots = max(0, max_investigation_queries - prefetched_executed)
         questions = [
             item.investigation_question
             for item in llm_output.hypotheses
             if item.investigation_question
-        ][:max_investigation_queries]
-        evidence: list[RootCauseEvidence] = []
+        ][:llm_slots]
+        evidence: list[RootCauseEvidence] = list(prefetched)
         if questions:
-            evidence = await self._investigate(
+            evidence.extend(
+                await self._investigate(
                 questions,
                 session_id=session_id,
                 workspace_id=workspace_id,
@@ -164,8 +174,9 @@ class RootCauseAnalysisAgent:
                 metadata=metadata,
                 snapshot=snapshot,
                 notes=notes,
+                )
             )
-        if evidence:
+        if len(evidence) > len(prefetched):
             llm_output = await self._request_hypotheses(
                 message=message,
                 sql=sql,
