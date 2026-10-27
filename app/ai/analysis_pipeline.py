@@ -65,6 +65,7 @@ from app.ai.sql_generation import SQLGenerateParams, SQLGenerationService
 from app.ai.sql_validation import SQLValidateParams, SQLValidationService
 from app.ai.trend_analysis import TrendAnalysisAgent
 from app.ai.trend_analysis.models import TrendDirection
+from app.ai.visualization_agent import build_chart_spec
 from app.core.config import settings
 from app.mcp import build_postgres_mcp
 from app.services.query_history import QueryHistoryService
@@ -75,6 +76,13 @@ _PREVIEW_MAX_ROWS = 5
 _MAX_LISTED_ITEMS = 3
 _MAX_SQL_IN_ANSWER = 240
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+# Multiplicative claims ("doubled", "halved") assert a ratio no raw cell states;
+# they are only safe when the computed facts/trend series state that ratio.
+_MULTIPLIER_RE = re.compile(
+    r"\b(doubled|doubling|tripled|tripling|quadrupled|quadrupling|halved|halving|"
+    r"twofold|threefold|fourfold|twice\s+as\s+\w+|three\s+times\s+as\s+\w+)\b",
+    re.IGNORECASE,
+)
 _CHART_BY_SHAPE = {
     "time_series": "line",
     "categorical": "bar",
@@ -108,6 +116,7 @@ class AnalysisPayload:
     facts: list[str] | None = None
     notes: list[str] | None = None
     chart_hint: str | None = None
+    chart_spec: dict[str, Any] | None = None
     question_understood: str | None = None
     date_range: str | None = None
     assumptions: list[str] | None = None
@@ -205,12 +214,15 @@ async def run_analysis_pipeline(params: AnalysisPipelineParams) -> AnalysisPipel
     profile = build_analysis_profile(params.message, intent=params.intent, plan=params.plan)
     from app.ai.investigation.plan import build_investigation_plan, investigation_plan_summary
 
-    inv_steps = build_investigation_plan(
-        params.message,
-        params.metadata,
-        intent=params.intent,
-        profile=profile,
-    )
+    # Investigation SQL/plan is only needed for diagnostic root-cause questions.
+    inv_steps: list = []
+    if profile.run_root_cause and settings.AI_INVESTIGATION_MAX_QUERIES > 0:
+        inv_steps = build_investigation_plan(
+            params.message,
+            params.metadata,
+            intent=params.intent,
+            profile=profile,
+        )
     spec = build_analysis_spec(
         intent=params.intent,
         plan=params.plan,
@@ -325,6 +337,7 @@ async def run_analysis_pipeline(params: AnalysisPipelineParams) -> AnalysisPipel
         facts=facts,
         execution=ctx.execution,
         extra_notes=list(run.notes),
+        investigation_steps=inv_steps or None,
     )
     stages.append(
         {
@@ -1046,13 +1059,15 @@ async def _run_phase8(
     facts: ResultFacts | None = None,
     execution: SQLExecutionService | None = None,
     extra_notes: list[str] | None = None,
+    investigation_steps: list | None = None,
 ) -> AnalysisPayload:
-    """Run only the agents the question needs; independent agents concurrently.
+    """Run only the agents the question needs; independent work concurrently.
 
-    Stage 1: data analyst, trend, anomaly (independent).
-    Stage 2: root cause (needs trend/anomaly findings).
+    Stage 1: data analyst, trend, anomaly, and (when needed) planned investigation
+    SQL — all independent of each other.
+    Stage 2: root cause (needs trend/anomaly findings + investigation evidence).
     Stage 3: insight and recommendation (consume earlier outputs).
-    Every agent is optional: failures/timeouts become notes, never errors.
+    Every agent is optional: failures/timeouts become notes; measured facts remain.
     """
     from app.ai.llm import AsyncLLMClient, llm_client_config_from_settings
 
@@ -1066,6 +1081,7 @@ async def _run_phase8(
         question_types=profile.labels(),
         facts=[line for line in [facts.headline, *facts.lines] if line] or None,
         chart_hint=_chart_hint(facts),
+        chart_spec=build_chart_spec(message=message, query_result=query_result, facts=facts),
     )
 
     def _finish(**agents: Any) -> AnalysisPayload:
@@ -1123,18 +1139,16 @@ async def _run_phase8(
 
     agent_timeout = settings.AI_CHAT_PHASE8_AGENT_TIMEOUT_SECONDS
     rca_timeout = settings.AI_CHAT_PHASE8_RCA_TIMEOUT_SECONDS
-
-    def _client(timeout: float) -> AsyncLLMClient:
-        return AsyncLLMClient(
-            replace(
-                base_cfg,
-                max_tokens=min(base_cfg.max_tokens, settings.AI_CHAT_PHASE8_MAX_TOKENS),
-                max_retries=0,
-                timeout=min(base_cfg.timeout, timeout),
-            )
+    # One shared client: connection reuse, bounded retries, wait_for still caps each call.
+    llm_client = AsyncLLMClient(
+        replace(
+            base_cfg,
+            max_tokens=min(base_cfg.max_tokens, settings.AI_CHAT_PHASE8_MAX_TOKENS),
+            max_retries=settings.AI_CHAT_PHASE8_MAX_RETRIES,
+            timeout=min(base_cfg.timeout, max(agent_timeout, rca_timeout)),
+            retry_max_backoff=min(base_cfg.retry_max_backoff, 2.0),
         )
-
-    llm_client = _client(agent_timeout)
+    )
     common = dict(
         session_id=session_id,
         workspace_id=workspace_id,
@@ -1152,26 +1166,74 @@ async def _run_phase8(
         "root_cause_analysis": "Root cause analysis",
         "insight": "Insight generation",
         "recommendation": "Recommendations",
+        "investigation": "Diagnostic investigation",
     }
+    _FACT_FALLBACK = (
+        " Measured query results and facts above remain the evidence-based answer."
+    )
 
     async def _run(label: str, factory, timeout: float):
         remaining = deadline - time.monotonic()
         if remaining <= 1:
             logger.warning("phase8 budget exhausted; skipping %s", label)
-            notes.append(f"{readable[label]} was skipped because the analysis time budget ran out.")
+            notes.append(
+                f"{readable[label]} was skipped because the analysis time budget ran out."
+                + _FACT_FALLBACK
+            )
             return None
         try:
             return await asyncio.wait_for(factory(), timeout=min(timeout, remaining))
         except asyncio.TimeoutError:
             logger.warning("%s timed out", label)
-            notes.append(f"{readable[label]} did not finish in time.")
+            notes.append(f"{readable[label]} did not finish in time." + _FACT_FALLBACK)
         except Exception as exc:  # noqa: BLE001
             logger.warning("%s skipped error=%s", label, type(exc).__name__)
-            notes.append(f"{readable[label]} was unavailable for this question.")
+            notes.append(
+                f"{readable[label]} was unavailable for this question." + _FACT_FALLBACK
+            )
         return None
 
     async def _none():
         return None
+
+    async def _run_investigation():
+        if (
+            not profile.run_root_cause
+            or execution is None
+            or settings.AI_INVESTIGATION_MAX_QUERIES <= 0
+        ):
+            return None
+        from app.ai.investigation.runner import run_planned_investigation
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 1:
+            notes.append(
+                "Diagnostic investigation was skipped because the analysis time budget ran out."
+                + _FACT_FALLBACK
+            )
+            return None
+        try:
+            return await run_planned_investigation(
+                session=db,
+                execution=execution,
+                message=message,
+                metadata=metadata,
+                workspace_id=workspace_id,
+                organization_id=organization_id,
+                user_id=user_id,
+                data_source_id=metadata.data_source_id,
+                session_id=session_id,
+                intent=intent,
+                profile=profile,
+                deadline=deadline,
+                steps=investigation_steps,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("investigation skipped error=%s", type(exc).__name__)
+            notes.append(
+                "Diagnostic investigation was unavailable for this question." + _FACT_FALLBACK
+            )
+            return None
 
     stage1 = await asyncio.gather(
         _run(
@@ -1195,32 +1257,16 @@ async def _run_phase8(
         )
         if profile.run_anomaly
         else _none(),
+        # Overlap investigation SQL with independent LLM agents (no extra wall clock).
+        _run_investigation(),
     )
-    analyst, trend, anomaly = stage1
+    analyst, trend, anomaly, investigation = stage1
+    if investigation is not None and investigation.notes:
+        notes.extend(investigation.notes)
 
     root_cause = None
     if profile.run_root_cause:
-        from app.ai.investigation.runner import run_planned_investigation
-
-        investigation = None
-        if execution is not None and settings.AI_INVESTIGATION_MAX_QUERIES > 0:
-            investigation = await run_planned_investigation(
-                session=db,
-                execution=execution,
-                message=message,
-                metadata=metadata,
-                workspace_id=workspace_id,
-                organization_id=organization_id,
-                user_id=user_id,
-                data_source_id=metadata.data_source_id,
-                session_id=session_id,
-                intent=intent,
-                profile=profile,
-                deadline=deadline,
-            )
-            if investigation.notes:
-                notes.extend(investigation.notes)
-        rca_kwargs: dict[str, Any] = {"llm_client": _client(rca_timeout)}
+        rca_kwargs: dict[str, Any] = {"llm_client": llm_client}
         if execution is not None:
             rca_kwargs["sql_execution_service"] = execution
         inv = investigation
@@ -1338,7 +1384,7 @@ def _compose_answer(
 ) -> str:
     """Answer = context + measured facts, then grounded agent findings."""
     facts = facts or build_result_facts(result)
-    evidence = _answer_evidence(result, facts)
+    evidence = _answer_evidence(result, facts, payload)
     weak_agents = _weak_grounding_agents(payload.evaluation)
     scrub_notes: list[str] = []
     sections: list[str] = []
@@ -1360,43 +1406,68 @@ def _compose_answer(
         elif text:
             scrub_notes.append("Dropped analysis text with numbers not present in the query results.")
 
+    gap_items: list[str] = []
+    if facts.is_empty:
+        gap_items.append(
+            "No rows were returned, so no numeric conclusion can be drawn from this query."
+        )
+
     trend = payload.trend
-    if (
-        trend
-        and "TREND_ANALYSIS" not in weak_agents
-        and trend.get("direction") not in (None, TrendDirection.INSUFFICIENT_DATA.value)
-    ):
-        grounded = _ground_narrative(str(trend.get("summary") or ""), evidence)
-        if grounded:
-            sections.append(f"Trend: {grounded}")
-        elif trend.get("summary"):
-            scrub_notes.append("Dropped trend text with numbers not present in the query results.")
+    if trend and trend.get("direction") == TrendDirection.INSUFFICIENT_DATA.value:
+        gap_items.append(
+            "Evidence is insufficient to establish a trend direction from the returned periods."
+        )
+    elif trend and "TREND_ANALYSIS" not in weak_agents and trend.get("direction") is not None:
+        series = trend.get("series") or {}
+        # The narrative must agree with the deterministically computed series,
+        # even when evaluation was not run for this answer.
+        if series and series.get("direction") not in (None, trend.get("direction")):
+            scrub_notes.append("Dropped trend text that contradicts the computed series.")
+        else:
+            grounded = _ground_narrative(str(trend.get("summary") or ""), evidence)
+            if grounded:
+                sections.append(f"Trend: {grounded}")
+            elif trend.get("summary"):
+                scrub_notes.append("Dropped trend text with numbers not present in the query results.")
 
     anomaly = payload.anomaly
     if anomaly and "ANOMALY_DETECTION" not in weak_agents and (anomaly.get("anomaly_count") or 0) > 0:
-        grounded = _ground_narrative(str(anomaly.get("summary") or ""), evidence)
-        if grounded:
-            sections.append(f"Anomalies: {grounded}")
-        elif anomaly.get("summary"):
-            scrub_notes.append("Dropped anomaly text with numbers not present in the query results.")
+        scan = anomaly.get("scan") or {}
+        scanned = scan.get("anomalies")
+        if isinstance(scanned, list) and len(scanned) != (anomaly.get("anomaly_count") or 0):
+            scrub_notes.append("Dropped anomaly text that contradicts the anomaly scan.")
+        else:
+            grounded = _ground_narrative(str(anomaly.get("summary") or ""), evidence)
+            if grounded:
+                sections.append(f"Anomalies: {grounded}")
+            elif anomaly.get("summary"):
+                scrub_notes.append("Dropped anomaly text with numbers not present in the query results.")
 
     root_cause = payload.root_cause
     if root_cause and "ROOT_CAUSE_ANALYSIS" not in weak_agents and root_cause.get("primary_cause"):
         hypotheses = root_cause.get("hypotheses") or []
         items = []
         for hypothesis in hypotheses[:_MAX_LISTED_ITEMS]:
+            question = hypothesis.get("investigation_question")
+            if question:
+                grounded_q = _ground_narrative(str(question), evidence)
+                if grounded_q:
+                    gap_items.append(f"Further evidence needed: {grounded_q}")
             statement = _ground_narrative(str(hypothesis.get("statement") or ""), evidence)
             if not statement:
                 continue
+            supporting = str(hypothesis.get("supporting_evidence") or "")
+            evidence_text = _ground_narrative(supporting, evidence)
+            if supporting.strip() and not evidence_text:
+                # A causal claim whose cited evidence is not in any result is
+                # an unverified inference; do not present it as a cause.
+                continue
             confidence = str(hypothesis.get("confidence_score") or "").lower()
-            evidence_text = _ground_narrative(
-                str(hypothesis.get("supporting_evidence") or ""), evidence
-            )
             line = statement + (f" ({confidence} confidence)" if confidence else "")
             if evidence_text:
                 line += f" Evidence: {evidence_text}"
             items.append(line)
-        if not items:
+        if not items and not hypotheses:
             primary = _ground_narrative(str(root_cause["primary_cause"]).strip(), evidence)
             if primary:
                 items = [primary]
@@ -1408,20 +1479,40 @@ def _compose_answer(
             )
 
     insight = payload.insight
+    if insight:
+        for gap in insight.get("data_gaps") or []:
+            grounded_gap = _ground_narrative(str(gap), evidence)
+            if grounded_gap:
+                gap_items.append(grounded_gap)
     if insight and "INSIGHT" not in weak_agents and insight.get("insights"):
         items = []
         for item in insight["insights"][:_MAX_LISTED_ITEMS]:
             body = _ground_narrative(str(item.get("insight") or ""), evidence)
             if not body:
                 continue
-            title = str(item.get("title") or "").strip()
+            supporting = str(item.get("supporting_evidence") or "")
+            if supporting.strip() and not _ground_narrative(supporting, evidence):
+                continue
+            if not _reference_grounded(item.get("metric"), _groundable_names(payload, result)):
+                continue
+            title = _ground_title(str(item.get("title") or ""), evidence)
             items.append(f"{title}: {body}".strip(": "))
         if items:
-            sections.append(_bullets("Insights:", items))
+            sections.append(
+                _bullets(
+                    "Insights (inferences from the measured results, not direct measurements):",
+                    items,
+                )
+            )
         elif insight.get("insights"):
             scrub_notes.append("Dropped insights with numbers not present in the query results.")
 
     recommendation = payload.recommendation
+    if recommendation:
+        for gap in recommendation.get("data_gaps") or []:
+            grounded_gap = _ground_narrative(str(gap), evidence)
+            if grounded_gap:
+                gap_items.append(grounded_gap)
     if (
         recommendation
         and "RECOMMENDATION" not in weak_agents
@@ -1432,7 +1523,14 @@ def _compose_answer(
             body = _ground_narrative(str(item.get("recommendation") or ""), evidence)
             if not body:
                 continue
-            title = str(item.get("title") or "").strip()
+            supporting = str(item.get("supporting_evidence") or "")
+            if supporting.strip() and not _ground_narrative(supporting, evidence):
+                continue
+            if not _reference_grounded(
+                item.get("evidence_reference"), _groundable_names(payload, result)
+            ):
+                continue
+            title = _ground_title(str(item.get("title") or ""), evidence)
             items.append(f"{title}: {body}".strip(": "))
         if items:
             sections.append(_bullets("Recommendations:", items))
@@ -1440,6 +1538,19 @@ def _compose_answer(
             scrub_notes.append(
                 "Dropped recommendations with numbers not present in the query results."
             )
+
+    if gap_items:
+        sections.append(
+            _bullets(
+                "Evidence limits (what the results cannot establish):",
+                list(dict.fromkeys(gap_items))[:_MAX_LISTED_ITEMS],
+            )
+        )
+    if any(note.startswith("Dropped ") for note in scrub_notes):
+        scrub_notes.append(
+            "Evidence is insufficient to support some narrative claims; "
+            "rely on the measured facts above."
+        )
 
     if weak_agents:
         scrub_notes.append(
@@ -1474,7 +1585,14 @@ def _answer_context(payload: AnalysisPayload) -> str | None:
     return "\n".join(lines) if lines else None
 
 
-def _answer_evidence(result: SQLExecutionResult, facts: ResultFacts) -> list[float]:
+def _answer_evidence(
+    result: SQLExecutionResult,
+    facts: ResultFacts,
+    payload: AnalysisPayload | None = None,
+) -> list[float]:
+    """Numbers an answer may cite: SQL rows, computed facts, and deterministic
+    upstream evidence (trend series, anomaly scan, key metrics, RCA evidence
+    rows). Narrative text from any agent is never evidence for itself."""
     values = set(evidence_numbers(query_result=result))
     for text in (facts.headline, *facts.lines, *facts.notes):
         if text:
@@ -1482,7 +1600,80 @@ def _answer_evidence(result: SQLExecutionResult, facts: ResultFacts) -> list[flo
                 float(token.replace(",", ""))
                 for token in re.findall(r"-?\d[\d,]*(?:\.\d+)?", text)
             )
-    return sorted(values)
+    if payload is not None:
+        if payload.trend:
+            values.add(payload.trend.get("growth_rate_percent"))
+            _collect_numbers(payload.trend.get("series"), values)
+        if payload.anomaly:
+            _collect_numbers((payload.anomaly.get("scan") or {}), values)
+        if payload.insight:
+            _collect_numbers(payload.insight.get("key_metrics"), values)
+        if payload.root_cause:
+            for item in payload.root_cause.get("evidence") or []:
+                if item.get("executed"):
+                    values.update(evidence_numbers(extra_rows=item.get("rows") or []))
+    return sorted(value for value in values if isinstance(value, (int, float)))
+
+
+def _collect_numbers(node: Any, values: set) -> None:
+    if isinstance(node, bool):
+        return
+    if isinstance(node, (int, float)):
+        values.add(float(node))
+    elif isinstance(node, dict):
+        for child in node.values():
+            _collect_numbers(child, values)
+    elif isinstance(node, (list, tuple)):
+        for child in node:
+            _collect_numbers(child, values)
+
+
+def _groundable_names(payload: AnalysisPayload, result: SQLExecutionResult) -> set[str]:
+    """Column/metric/insight names a per-item reference may legitimately cite."""
+    names: set[str] = set()
+
+    def add(name: Any) -> None:
+        if name:
+            text = str(name).strip().lower()
+            names.update({text, text.replace("_", " ")})
+
+    for column in result.columns:
+        add(column)
+    if payload.insight:
+        for metric in payload.insight.get("key_metrics") or []:
+            add(metric.get("column"))
+        for item in payload.insight.get("insights") or []:
+            add(item.get("title"))
+    if payload.root_cause:
+        for item in payload.root_cause.get("evidence") or []:
+            for column in item.get("columns") or []:
+                add(column)
+    return names
+
+
+def _reference_grounded(reference: Any, names: set[str]) -> bool:
+    """Missing references pass (minimal payloads); cited ones must exist."""
+    if reference is None or not str(reference).strip():
+        return True
+    return str(reference).strip().lower() in names
+
+
+def _ground_title(title: str, evidence: list[float]) -> str:
+    """Titles bypassed sentence scrubbing before; ground them or drop the title."""
+    title = title.strip()
+    if not title:
+        return ""
+    return title if _ground_narrative(title, evidence) else ""
+
+
+def _sentence_grounded(sentence: str, evidence: list[float]) -> bool:
+    if ungrounded_numbers([sentence], evidence):
+        return False
+    # A multiplier claim is grounded only if that ratio itself is a cited,
+    # evidence-backed number in the same sentence (e.g. "doubled (+100.0%)").
+    if _MULTIPLIER_RE.search(sentence) and not re.search(r"\d", sentence):
+        return False
+    return True
 
 
 def _ground_narrative(text: str, evidence: list[float]) -> str | None:
@@ -1490,12 +1681,12 @@ def _ground_narrative(text: str, evidence: list[float]) -> str | None:
     cleaned = " ".join((text or "").split()).strip()
     if not cleaned:
         return None
-    if not ungrounded_numbers([cleaned], evidence):
+    if _sentence_grounded(cleaned, evidence):
         return cleaned
     kept = [
         sentence.strip()
         for sentence in _SENTENCE_SPLIT_RE.split(cleaned)
-        if sentence.strip() and not ungrounded_numbers([sentence], evidence)
+        if sentence.strip() and _sentence_grounded(sentence, evidence)
     ]
     return " ".join(kept) if kept else None
 

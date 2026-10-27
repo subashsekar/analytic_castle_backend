@@ -18,6 +18,7 @@ from app.ai.intent_types import (
 )
 from app.ai.metadata_types import ResolvedMetadataContext
 from app.core.config import settings
+from app.schemas.charts import ChartSpec
 
 
 def _strip_text(value: Any) -> Any:
@@ -160,6 +161,7 @@ class AIPhase8AnalysisResponse(BaseModel):
     facts: list[str] | None = None
     notes: list[str] | None = None
     chart_hint: str | None = None
+    chart_spec: ChartSpec | None = None
     question_understood: str | None = None
     date_range: str | None = None
     assumptions: list[str] | None = None
@@ -280,6 +282,7 @@ def phase8_analysis_response(payload: object | None) -> AIPhase8AnalysisResponse
         facts=payload.facts,
         notes=payload.notes,
         chart_hint=payload.chart_hint,
+        chart_spec=payload.chart_spec,
         question_understood=payload.question_understood,
         date_range=payload.date_range,
         assumptions=payload.assumptions,

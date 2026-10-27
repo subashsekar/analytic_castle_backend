@@ -48,12 +48,12 @@ def _result(columns: list[str], rows: list[list[object]]) -> SQLExecutionResult:
     [
         ("What is the total number of orders?", {QuestionKind.AGGREGATE}, set()),
         ("Top 5 customers by spend", {QuestionKind.RANKING}, {"data_analyst"}),
-        ("Show monthly signups over time", {QuestionKind.TREND}, {"trend", "anomaly"}),
+        ("Show monthly signups over time", {QuestionKind.TREND}, {"trend"}),
         ("Were there any unusual spikes in tickets?", {QuestionKind.ANOMALY}, {"trend", "anomaly"}),
         (
             "Why did bookings drop last quarter?",
             {QuestionKind.DIAGNOSTIC},
-            {"trend", "anomaly", "root_cause", "insight"},
+            {"trend", "anomaly", "root_cause"},
         ),
         (
             "What should we do to improve retention?",

@@ -26,6 +26,13 @@ You must produce a structured JSON response containing:
 - confidence_score: A confidence score for your analysis: HIGH, MEDIUM, or LOW.
 - confidence_reasoning: A detailed reasoning explaining your confidence score. You must evaluate whether the data is sufficient, whether there are any data quality/correctness issues, or if the data is empty or incomplete.
 
+Grounding (applies to every field):
+- Every number you cite must be copied exactly from the query results above. Do not invent, estimate, round to a different value, or import numbers from outside the results.
+- Do not state a total, average, percentage, share, ranking, change, or comparison unless that value, or both values needed to read it directly, appear in the results. If a derived figure is not present, describe the underlying values instead of computing a new headline number.
+- A summary must match the results: name only columns, categories, and periods that appear in them, and do not claim a group is highest/lowest or a value rose/fell unless the results show that ordering or change.
+- Label anything that is not a direct reading of the results as an inference (for example, "This suggests ..."), and never present an inference, cause, or explanation as a measured fact.
+- If the results do not contain enough evidence to answer, say that evidence is insufficient in interpretation, set confidence_score to LOW, and keep conclusions free of unsupported claims.
+
 Handling Empty, Invalid, or Insufficient Data:
 - If the query results are empty (0 rows), you must handle this gracefully. Set the confidence_score to LOW, explain in confidence_reasoning that no data was returned from the database, and provide a helpful interpretation explaining that no records matched the criteria.
 - If the data is insufficient to fully answer the user's question, set the confidence_score to LOW or MEDIUM, explain what is missing in confidence_reasoning, and answer as best as you can with the available data in interpretation.

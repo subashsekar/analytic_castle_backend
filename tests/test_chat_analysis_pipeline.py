@@ -604,9 +604,8 @@ def test_diagnostic_runs_agents_concurrently_and_separates_hypotheses(
     monkeypatch.setattr(pipeline_mod.TrendAnalysisAgent, "analyze", AsyncMock(side_effect=_slow_none))
     monkeypatch.setattr(pipeline_mod.AnomalyDetectionAgent, "analyze", AsyncMock(side_effect=_slow_none))
     monkeypatch.setattr(pipeline_mod.RootCauseAnalysisAgent, "analyze", AsyncMock(return_value=rca))
-    monkeypatch.setattr(
-        pipeline_mod.InsightAgent, "generate", AsyncMock(side_effect=RuntimeError("down"))
-    )
+    insight = AsyncMock(side_effect=AssertionError("insight not selected for diagnostic"))
+    monkeypatch.setattr(pipeline_mod.InsightAgent, "generate", insight)
     data_analyst = AsyncMock(side_effect=AssertionError("not needed"))
     monkeypatch.setattr(pipeline_mod.DataAnalystAgent, "analyze", data_analyst)
     _force_llm_key(monkeypatch)
@@ -647,7 +646,8 @@ def test_diagnostic_runs_agents_concurrently_and_separates_hypotheses(
     assert "Largest contributors by region" in answer
     assert "Likely causes (hypotheses, not confirmed facts):" in answer
     assert "North sales collapsed in March." in answer
-    assert "Insight generation was unavailable" in answer
+    assert insight.call_count == 0
+    assert payload.insight is None
     assert "DIAGNOSTIC" in (payload.question_types or [])
     assert payload.chart_hint == "line"
     assert "Chart hint: line." in answer

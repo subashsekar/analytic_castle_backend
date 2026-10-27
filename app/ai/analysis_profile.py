@@ -199,13 +199,15 @@ def build_analysis_profile(
         QuestionKind.BREAKDOWN,
         QuestionKind.RANKING,
     }
+    # Skip agents that do not answer the question: anomaly is not needed for a
+    # plain trend, and diagnostic explanation is owned by root-cause (not insight).
     return AnalysisProfile(
         kinds=frozenset(kinds),
         run_data_analyst=bool(explanatory or insight) and not diagnostic,
         run_trend=trend or anomaly or diagnostic,
-        run_anomaly=anomaly or diagnostic or trend,
+        run_anomaly=anomaly or diagnostic,
         run_root_cause=diagnostic,
-        run_insight=insight or diagnostic or recommendation,
+        run_insight=insight or recommendation,
         run_recommendation=recommendation,
     )
 

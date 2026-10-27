@@ -219,6 +219,8 @@ class Settings(BaseSettings):
     # Root cause makes several LLM calls (hypotheses, evidence SQL, re-rank).
     AI_CHAT_PHASE8_RCA_TIMEOUT_SECONDS: float = Field(default=55.0, gt=1, le=240)
     AI_CHAT_PHASE8_RCA_MAX_INVESTIGATION_QUERIES: int = Field(default=3, ge=0, le=5)
+    # Bounded provider retries inside each agent wait_for window (0 = fail fast).
+    AI_CHAT_PHASE8_MAX_RETRIES: int = Field(default=1, ge=0, le=2)
     # Schema-grounded diagnostic queries (change, breakdowns, YoY/funnel/cohort) before RCA LLM follow-ups.
     AI_INVESTIGATION_MAX_QUERIES: int = Field(default=4, ge=0, le=5)
     AI_CHAT_PHASE8_MAX_TOKENS: int = Field(default=1_200, ge=256, le=4_096)

@@ -12,6 +12,7 @@ from app.db.models.email_verification_token import EmailVerificationToken
 from app.db.models.organization import Organization
 from app.db.models.password_reset_token import PasswordResetToken
 from app.db.models.query_history import QueryHistory
+from app.db.models.report import Report
 from app.db.models.refresh_token import RefreshToken
 from app.db.models.user import User
 from app.db.models.workspace import Workspace
@@ -53,6 +54,7 @@ __all__ = [
     "Organization",
     "PasswordResetToken",
     "QueryHistory",
+    "Report",
     "QueryHistoryStatus",
     "RefreshToken",
     "User",

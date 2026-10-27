@@ -38,18 +38,21 @@ async def run_planned_investigation(
     intent=None,
     profile=None,
     deadline: float | None = None,
+    steps=None,
 ) -> InvestigationRunResult:
     """Run schema-grounded investigation SQL; no LLM calls in this path."""
     del session
-    steps = build_investigation_plan(
+    # Reuse a plan already built for the SQL/spec stage when the caller has one.
+    planned = list(steps) if steps is not None else build_investigation_plan(
         message,
         metadata,
         intent=intent,
         profile=profile,
         max_steps=settings.AI_INVESTIGATION_MAX_QUERIES,
     )
-    if not steps:
+    if not planned:
         return InvestigationRunResult(steps_planned=0)
+    steps = planned
 
     evidence: list[RootCauseEvidence] = []
     contributions: list[DimensionContribution] = []
